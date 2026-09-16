@@ -241,3 +241,88 @@ func Softmax(x []float32) {
 		x[i] *= invSum
 	}
 }
+
+// DequantizeRowQ4_K dequantizes a row of Q4_K blocks into destination float32 slice.
+func DequantizeRowQ4_K(dst []float32, data []byte, cols int) {
+	numBlocks := cols / QK4_K
+	for b := 0; b < numBlocks; b++ {
+		blkOffset := b * BlockSizeQ4_K
+		dRaw := binary.LittleEndian.Uint16(data[blkOffset : blkOffset+2])
+		dminRaw := binary.LittleEndian.Uint16(data[blkOffset+2 : blkOffset+4])
+		d := FP16ToF32(dRaw)
+		dmin := FP16ToF32(dminRaw)
+
+		scales := data[blkOffset+4 : blkOffset+16]
+		qs := data[blkOffset+16 : blkOffset+144]
+
+		var sc [8]uint8
+		var m [8]uint8
+		for j := 0; j < 4; j++ {
+			sc[j] = scales[j] & 63
+			m[j] = scales[j+4] & 63
+			sc[j+4] = (scales[j+8] & 0x0F) | ((scales[j] >> 6) << 4)
+			m[j+4] = (scales[j+8] >> 4) | ((scales[j+4] >> 6) << 4)
+		}
+
+		dstBase := b * QK4_K
+		for sb := 0; sb < 4; sb++ {
+			d0 := d * float32(sc[2*sb+0])
+			m0 := dmin * float32(m[2*sb+0])
+			d1 := d * float32(sc[2*sb+1])
+			m1 := dmin * float32(m[2*sb+1])
+
+			sbOffset := sb * 32
+			dstOffset := dstBase + sb*64
+
+			for l := 0; l < 32; l++ {
+				v := qs[sbOffset+l]
+				dst[dstOffset+l] = d0*float32(v&0x0F) - m0
+				dst[dstOffset+l+32] = d1*float32(v>>4) - m1
+			}
+		}
+	}
+}
+
+// DequantizeRowQ5_0 dequantizes a row of Q5_0 blocks into destination float32 slice.
+func DequantizeRowQ5_0(dst []float32, data []byte, cols int) {
+	numBlocks := cols / QK5_0
+	for b := 0; b < numBlocks; b++ {
+		blkOffset := b * BlockSizeQ5_0
+		dRaw := binary.LittleEndian.Uint16(data[blkOffset : blkOffset+2])
+		d := FP16ToF32(dRaw)
+
+		qh := binary.LittleEndian.Uint32(data[blkOffset+2 : blkOffset+6])
+		qs := data[blkOffset+6 : blkOffset+22]
+
+		base := b * QK5_0
+		for i := 0; i < 16; i++ {
+			byteVal := qs[i]
+			x0 := byteVal & 0x0F
+			x1 := byteVal >> 4
+
+			h0 := uint8((qh >> i) & 1)
+			h1 := uint8((qh >> (i + 16)) & 1)
+
+			q0 := float32(int32(x0|(h0<<4)) - 16)
+			q1 := float32(int32(x1|(h1<<4)) - 16)
+
+			dst[base+i] = d * q0
+			dst[base+i+16] = d * q1
+		}
+	}
+}
+
+// DequantizeRowQ8_0 dequantizes a row of Q8_0 blocks into destination float32 slice.
+func DequantizeRowQ8_0(dst []float32, data []byte, cols int) {
+	numBlocks := cols / QK8_0
+	for b := 0; b < numBlocks; b++ {
+		blkOffset := b * BlockSizeQ8_0
+		dRaw := binary.LittleEndian.Uint16(data[blkOffset : blkOffset+2])
+		d := FP16ToF32(dRaw)
+		qs := data[blkOffset+2 : blkOffset+34]
+		base := b * QK8_0
+		for i := 0; i < 32; i++ {
+			dst[base+i] = d * float32(int8(qs[i]))
+		}
+	}
+}

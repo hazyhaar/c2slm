@@ -39,7 +39,7 @@ func NewWorkerPool() *WorkerPool {
 		numWorkers: nw,
 		startChans: make([]chan struct{}, nw),
 		quitChan:   make(chan struct{}),
-		q8k:        make([]byte, (8192/256)*tensor.BlockSizeQ8_K),
+		q8k:        make([]byte, (16384/256)*tensor.BlockSizeQ8_K),
 	}
 
 	for i := 0; i < nw; i++ {

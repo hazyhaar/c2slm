@@ -76,6 +76,20 @@ func Forward(m *Model, cache *KVCache, a *Arena, tokenID int32, pos int) []float
 		DispatchGEMV(a.Pool, a.V, layer.AttnV, a.NormX, kvHeads*headDim, m.EmbdLength)
 		tensor.AddBias(a.V, layer.AttnVBias)
 
+		// Per-head QK-Norm (Qwen3)
+		if len(layer.AttnQNorm) > 0 {
+			for h := 0; h < m.NumHeads; h++ {
+				qHead := a.Q[h*headDim : (h+1)*headDim]
+				tensor.RMSNorm(qHead, qHead, layer.AttnQNorm, m.RMSNormEps)
+			}
+		}
+		if len(layer.AttnKNorm) > 0 {
+			for h := 0; h < kvHeads; h++ {
+				kHead := a.K[h*headDim : (h+1)*headDim]
+				tensor.RMSNorm(kHead, kHead, layer.AttnKNorm, m.RMSNormEps)
+			}
+		}
+
 		// RoPE NeoX (rotate_half)
 		tensor.RoPENeoX(a.Q, m.NumHeads, headDim, pos, m.RoPEBase)
 		tensor.RoPENeoX(a.K, kvHeads, headDim, pos, m.RoPEBase)
@@ -169,14 +183,23 @@ func ComputeLogits(m *Model, a *Arena, normX []float32, outLogits []float32, tar
 }
 
 func computeSingleTokenLogit(m *Model, normX []float32, tokID, cols int) float32 {
-	if m.OutputWeight.Type == gguf.GGMLTypeQ8_0 {
+	switch m.OutputWeight.Type {
+	case gguf.GGMLTypeQ8_0:
 		rowBytes := (cols / tensor.QK8_0) * tensor.BlockSizeQ8_0
 		rowOffset := tokID * rowBytes
 		return tensor.DotQ8_0(m.OutputWeight.Data[rowOffset:rowOffset+rowBytes], normX, cols)
-	} else if m.OutputWeight.Type == gguf.GGMLTypeQ5_0 {
+	case gguf.GGMLTypeQ5_0:
 		rowBytes := (cols / tensor.QK5_0) * tensor.BlockSizeQ5_0
 		rowOffset := tokID * rowBytes
 		return tensor.DotQ5_0(m.OutputWeight.Data[rowOffset:rowOffset+rowBytes], normX, cols)
+	case gguf.GGMLTypeQ6_K:
+		rowBytes := (cols / tensor.QK6_K) * tensor.BlockSizeQ6_K
+		rowOffset := tokID * rowBytes
+		return tensor.DotQ6_K(m.OutputWeight.Data[rowOffset:rowOffset+rowBytes], normX, cols)
+	case gguf.GGMLTypeQ4_K:
+		rowBytes := (cols / tensor.QK4_K) * tensor.BlockSizeQ4_K
+		rowOffset := tokID * rowBytes
+		return tensor.DotQ4_K(m.OutputWeight.Data[rowOffset:rowOffset+rowBytes], normX, cols)
 	}
 	return 0
 }

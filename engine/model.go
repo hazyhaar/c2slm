@@ -14,9 +14,11 @@ type Layer struct {
 	Index     int
 	AttnNorm  []float32 // [896]
 	AttnQ     *gguf.TensorInfo
-	AttnQBias []float32 // [896]
+	AttnQBias []float32
+	AttnQNorm []float32 // QK-Norm per-head (Qwen3)
 	AttnK     *gguf.TensorInfo
-	AttnKBias []float32 // [128]
+	AttnKBias []float32
+	AttnKNorm []float32 // QK-Norm per-head (Qwen3)
 	AttnV     *gguf.TensorInfo
 	AttnVBias []float32 // [128]
 	AttnOut   *gguf.TensorInfo
@@ -55,29 +57,50 @@ func LoadModel(path string) (*Model, error) {
 
 	embdLen, _ := gf.GetUint32("qwen2.embedding_length")
 	if embdLen == 0 {
+		embdLen, _ = gf.GetUint32("qwen3.embedding_length")
+	}
+	if embdLen == 0 {
 		embdLen = 896
 	}
 	numLayers, _ := gf.GetUint32("qwen2.block_count")
+	if numLayers == 0 {
+		numLayers, _ = gf.GetUint32("qwen3.block_count")
+	}
 	if numLayers == 0 {
 		numLayers = 24
 	}
 	numHeads, _ := gf.GetUint32("qwen2.attention.head_count")
 	if numHeads == 0 {
+		numHeads, _ = gf.GetUint32("qwen3.attention.head_count")
+	}
+	if numHeads == 0 {
 		numHeads = 14
 	}
 	numKVHeads, _ := gf.GetUint32("qwen2.attention.head_count_kv")
+	if numKVHeads == 0 {
+		numKVHeads, _ = gf.GetUint32("qwen3.attention.head_count_kv")
+	}
 	if numKVHeads == 0 {
 		numKVHeads = 2
 	}
 	ffnDim, _ := gf.GetUint32("qwen2.feed_forward_length")
 	if ffnDim == 0 {
+		ffnDim, _ = gf.GetUint32("qwen3.feed_forward_length")
+	}
+	if ffnDim == 0 {
 		ffnDim = 4864
 	}
 	ropeTheta, _ := gf.GetFloat32("qwen2.rope.freq_base")
 	if ropeTheta == 0 {
+		ropeTheta, _ = gf.GetFloat32("qwen3.rope.freq_base")
+	}
+	if ropeTheta == 0 {
 		ropeTheta = 1000000.0
 	}
 	eps, _ := gf.GetFloat32("qwen2.attention.layer_norm_rms_epsilon")
+	if eps == 0 {
+		eps, _ = gf.GetFloat32("qwen3.attention.layer_norm_rms_epsilon")
+	}
 	if eps == 0 {
 		eps = 1e-6
 	}
@@ -135,11 +158,17 @@ func LoadModel(path string) (*Model, error) {
 		if ti, ok := gf.TensorMap[fmt.Sprintf("blk.%d.attn_q.bias", i)]; ok {
 			l.AttnQBias = bytesToF32(ti.Data)
 		}
+		if ti, ok := gf.TensorMap[fmt.Sprintf("blk.%d.attn_q_norm.weight", i)]; ok {
+			l.AttnQNorm = bytesToF32(ti.Data)
+		}
 		if ti, ok := gf.TensorMap[fmt.Sprintf("blk.%d.attn_k.weight", i)]; ok {
 			l.AttnK = ti
 		}
 		if ti, ok := gf.TensorMap[fmt.Sprintf("blk.%d.attn_k.bias", i)]; ok {
 			l.AttnKBias = bytesToF32(ti.Data)
+		}
+		if ti, ok := gf.TensorMap[fmt.Sprintf("blk.%d.attn_k_norm.weight", i)]; ok {
+			l.AttnKNorm = bytesToF32(ti.Data)
 		}
 		if ti, ok := gf.TensorMap[fmt.Sprintf("blk.%d.attn_v.weight", i)]; ok {
 			l.AttnV = ti
@@ -181,39 +210,31 @@ func (m *Model) Close() error {
 	return nil
 }
 
-// EmbedToken extracts and dequantizes token embedding into out [896]float32
+// EmbedToken extracts and dequantizes token embedding into out float32 slice
 func (m *Model) EmbedToken(out []float32, tokenID int32) {
 	if int(tokenID) >= m.VocabSize || tokenID < 0 {
 		tokenID = 0
 	}
-	// token_embd.weight is Q5_0, dimensions [896, 151936]
-	// Each row of 896 elements has (896 / 32) * 22 = 28 * 22 = 616 bytes
-	rowBytes := (m.EmbdLength / tensor.QK5_0) * tensor.BlockSizeQ5_0
-	rowOffset := int(tokenID) * rowBytes
-	data := m.TokenEmbd.Data[rowOffset : rowOffset+rowBytes]
-
-	for b := 0; b < m.EmbdLength/tensor.QK5_0; b++ {
-		blkOffset := b * tensor.BlockSizeQ5_0
-		dRaw := binary.LittleEndian.Uint16(data[blkOffset : blkOffset+2])
-		d := tensor.FP16ToF32(dRaw)
-
-		qh := binary.LittleEndian.Uint32(data[blkOffset+2 : blkOffset+6])
-		qs := data[blkOffset+6 : blkOffset+22]
-
-		base := b * tensor.QK5_0
-		for i := 0; i < 16; i++ {
-			byteVal := qs[i]
-			x0 := byteVal & 0x0F
-			x1 := byteVal >> 4
-
-			h0 := uint8((qh >> i) & 1)
-			h1 := uint8((qh >> (i + 16)) & 1)
-
-			q0 := float32(int32(x0|(h0<<4)) - 16)
-			q1 := float32(int32(x1|(h1<<4)) - 16)
-
-			out[base+i] = d * q0
-			out[base+i+16] = d * q1
+	switch m.TokenEmbd.Type {
+	case gguf.GGMLTypeQ4_K:
+		rowBytes := (m.EmbdLength / tensor.QK4_K) * tensor.BlockSizeQ4_K
+		rowOffset := int(tokenID) * rowBytes
+		tensor.DequantizeRowQ4_K(out, m.TokenEmbd.Data[rowOffset:rowOffset+rowBytes], m.EmbdLength)
+	case gguf.GGMLTypeQ5_0:
+		rowBytes := (m.EmbdLength / tensor.QK5_0) * tensor.BlockSizeQ5_0
+		rowOffset := int(tokenID) * rowBytes
+		tensor.DequantizeRowQ5_0(out, m.TokenEmbd.Data[rowOffset:rowOffset+rowBytes], m.EmbdLength)
+	case gguf.GGMLTypeQ8_0:
+		rowBytes := (m.EmbdLength / tensor.QK8_0) * tensor.BlockSizeQ8_0
+		rowOffset := int(tokenID) * rowBytes
+		tensor.DequantizeRowQ8_0(out, m.TokenEmbd.Data[rowOffset:rowOffset+rowBytes], m.EmbdLength)
+	case gguf.GGMLTypeF32:
+		rowBytes := m.EmbdLength * 4
+		rowOffset := int(tokenID) * rowBytes
+		data := m.TokenEmbd.Data[rowOffset : rowOffset+rowBytes]
+		for i := 0; i < m.EmbdLength; i++ {
+			bits := binary.LittleEndian.Uint32(data[i*4 : (i+1)*4])
+			out[i] = math.Float32frombits(bits)
 		}
 	}
 }
