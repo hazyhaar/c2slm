@@ -123,10 +123,6 @@ func runSinglePrompt(engine *c2slm.Engine, system, user string, maxTokens int, s
 }
 
 func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stopStrings []string) {
-	chatBox := NewChatBox()
-	chatBox.InitScreen(engine.Model.NumLayers, engine.KVCache.MaxTokens)
-	defer chatBox.ResetScreen()
-
 	// Initialisation des outils de codage, de fichiers et de recherche web
 	toolReg := c2slm.NewToolRegistry()
 	_, err := c2slm.RegisterCodingTools(toolReg, ".")
@@ -134,9 +130,16 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 		fmt.Fprintf(os.Stderr, "Avertissement outils: %v\n", err)
 	}
 
-	// The system prompt is materialized exactly once; every later turn appends
-	// only its delta, so the cached prefix is never recomputed.
+	// Pré-remplissage du préfixe système pendant la phase de démarrage
+	fmt.Printf("Initialisation du préfixe système (%d outils actifs)... ", toolReg.Len())
+	t0 := time.Now()
 	prefillSystem(engine, system, toolReg)
+	fmt.Printf("prêt en %v (%d jetons en cache).\n", time.Since(t0).Round(time.Millisecond), engine.KVCache.SeqLen)
+
+	// Lancement de l'interface TUI plein écran : modèle 100% chaud et prêt
+	chatBox := NewChatBox()
+	chatBox.InitScreen(engine.Model.NumLayers, engine.KVCache.MaxTokens)
+	defer chatBox.ResetScreen()
 
 	for {
 		line, readErr := chatBox.ReadPrompt()

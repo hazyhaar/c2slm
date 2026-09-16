@@ -200,8 +200,9 @@ func (c *ChatBox) DrawChatBox(content string, isGenerating bool) {
 		fmt.Printf("%s└─%s%s%s%s┘%s", ansiCyan, ansiGray, status, ansiReset, ansiCyan, strings.Repeat("─", rem))
 	}
 
-	// Restaurer la position du curseur
-	fmt.Print("\x1b[u")
+	// Placer le curseur directement sur la ligne de saisie de la Chatbox
+	cursorCol := 5 + len([]rune(content))
+	fmt.Printf("\x1b[%d;%dH\x1b[?25h", c.chatTop+1, cursorCol)
 }
 
 // ReadPrompt attend la saisie utilisateur directement dans la Chatbox ancrée en bas.
