@@ -187,8 +187,8 @@ func (c *ChatBox) InitScreen(numLayers, maxTokens int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Alternate screen (\x1b[?1049h), clear (\x1b[2J), curseur en haut (\x1b[H)
-	fmt.Print("\x1b[?1049h\x1b[2J\x1b[H")
+	// Alternate screen (\x1b[?1049h), désactivation auto-wrap (\x1b[?7l), clear (\x1b[2J), curseur en haut (\x1b[H)
+	fmt.Print("\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H")
 	c.applyScrollRegionLocked()
 
 	// Bannière affichée dans la zone de défilement supérieure
@@ -227,8 +227,8 @@ func (c *ChatBox) ResetScreen() {
 	if !c.isTTY {
 		return
 	}
-	// Réinitialise la scroll region, quitte l'alternate screen, réaffiche le curseur
-	fmt.Print("\x1b[r\x1b[?1049l\x1b[?25h")
+	// Réinitialise la scroll region, restaure l'auto-wrap (\x1b[?7h), quitte l'alternate screen, réaffiche le curseur
+	fmt.Print("\x1b[r\x1b[?7h\x1b[?1049l\x1b[?25h")
 }
 
 // DrawChatBox dessine la boîte de saisie ancrée en bas de l'écran.
@@ -528,9 +528,6 @@ func (c *ChatBox) BeginInference() (interrupted *atomic.Bool, endFn func()) {
 		_ = unix.IoctlSetTermios(c.inFd, unix.TCSETSW, c.origTermio)
 		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, uintptr(c.inFd), 0x540b, 0) // TCFLSH
 		drainFd(c.inFd)
-
-		// Remet la chatbox en mode saisie
-		c.drawChatBoxLocked("", false)
 	}
 
 	return interrupted, endFn
@@ -577,13 +574,7 @@ func (c *ChatBox) PrintToolResult(output string) {
 func (c *ChatBox) PrintAssistantFooter(interrupted bool, totalTokens int, elapsed time.Duration, seqLen, maxTokens int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if interrupted {
-		if c.isTTY {
-			fmt.Printf("\r\n%s⏹  [Inférence interrompue par l'utilisateur (ESC)]%s\r\n", ansiBoldRed, ansiReset)
-		} else {
-			fmt.Printf("\n⏹  [Inférence interrompue par l'utilisateur (ESC)]\n")
-		}
-	}
+
 
 	tps := 0.0
 	if elapsed.Seconds() > 0 && totalTokens > 0 {
@@ -601,8 +592,16 @@ func (c *ChatBox) PrintAssistantFooter(interrupted bool, totalTokens int, elapse
 	sep := strings.Repeat("─", dashLen)
 
 	if c.isTTY {
-		fmt.Printf("\r\n%s%s%s%s%s\r\n", ansiGray, sep, info, sep, ansiReset)
+		if interrupted {
+			fmt.Printf("\x1b[%d;1H\r\n%s⏹  [Inférence interrompue par l'utilisateur (ESC)]%s\r\n", c.scrollBottom, ansiBoldRed, ansiReset)
+		}
+		fmt.Printf("\x1b[%d;1H\r\n%s%s%s%s%s\r\n", c.scrollBottom, ansiGray, sep, info, sep, ansiReset)
+		// Redessiner immédiatement la boîte de saisie propre en bas
+		c.drawChatBoxLocked("", false)
 	} else {
+		if interrupted {
+			fmt.Printf("\n⏹  [Inférence interrompue par l'utilisateur (ESC)]\n")
+		}
 		fmt.Printf("\n%s%s%s%s%s\n", ansiGray, sep, info, sep, ansiReset)
 	}
 }

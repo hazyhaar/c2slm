@@ -153,6 +153,22 @@ func (e *Engine) generate(lastNormX []float32, currentPos, maxNewTokens int, sto
 		// Project logits for current state
 		engine.ComputeLogits(e.Model, e.Arena, lastNormX, e.Arena.Logits, nil)
 
+		// Repetition penalty on recent tokens in KV Cache to prevent conversational loops
+		startWindow := currentPos - 64
+		if startWindow < 0 {
+			startWindow = 0
+		}
+		for p := startWindow; p < currentPos; p++ {
+			tok := e.KVCache.TokenIDs[p]
+			if tok >= 0 && int(tok) < e.Model.VocabSize && tok != imEnd && tok != eos {
+				if e.Arena.Logits[tok] > 0 {
+					e.Arena.Logits[tok] /= 1.15
+				} else {
+					e.Arena.Logits[tok] *= 1.15
+				}
+			}
+		}
+
 		// Greedy argmax selection
 		bestID := int32(0)
 		bestLogit := e.Arena.Logits[0]
