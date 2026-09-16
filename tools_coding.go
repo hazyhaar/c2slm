@@ -108,11 +108,30 @@ func RegisterCodingTools(reg *ToolRegistry, workspaceRoot string) (*CodingTools,
 	return ct, nil
 }
 
-func (ct *CodingTools) resolvePath(p string) string {
-	if filepath.IsAbs(p) {
-		return filepath.Clean(p)
+func (ct *CodingTools) resolvePath(p string) (string, error) {
+	root := ct.WorkspaceRoot
+	if root == "" {
+		var err error
+		root, err = os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("impossible de déterminer la racine de travail: %w", err)
+		}
 	}
-	return filepath.Clean(filepath.Join(ct.WorkspaceRoot, p))
+	root = filepath.Clean(root)
+
+	var target string
+	if filepath.IsAbs(p) {
+		target = filepath.Clean(p)
+	} else {
+		target = filepath.Clean(filepath.Join(root, p))
+	}
+
+	// Contrôle strict de confinement (jail) : interdire tout chemin hors de WorkspaceRoot
+	rel, err := filepath.Rel(root, target)
+	if err != nil || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return "", fmt.Errorf("accès refusé: le chemin %q est hors du workspace autorise (%s)", p, root)
+	}
+	return target, nil
 }
 
 // ReadFile lit un fichier texte avec support de plage de lignes.
@@ -125,7 +144,10 @@ func (ct *CodingTools) ReadFile(args json.RawMessage) (string, error) {
 	if err := json.Unmarshal(args, &req); err != nil {
 		return "", fmt.Errorf("read_file: json invalide: %w", err)
 	}
-	target := ct.resolvePath(req.Path)
+	target, err := ct.resolvePath(req.Path)
+	if err != nil {
+		return "", err
+	}
 	f, err := os.Open(target)
 	if err != nil {
 		return "", fmt.Errorf("read_file open: %w", err)
@@ -172,7 +194,10 @@ func (ct *CodingTools) WriteFile(args json.RawMessage) (string, error) {
 	if err := json.Unmarshal(args, &req); err != nil {
 		return "", fmt.Errorf("write_file: json invalide: %w", err)
 	}
-	target := ct.resolvePath(req.Path)
+	target, err := ct.resolvePath(req.Path)
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 		return "", fmt.Errorf("write_file mkdir: %w", err)
 	}
@@ -192,7 +217,10 @@ func (ct *CodingTools) PatchFile(args json.RawMessage) (string, error) {
 	if err := json.Unmarshal(args, &req); err != nil {
 		return "", fmt.Errorf("patch_file: json invalide: %w", err)
 	}
-	target := ct.resolvePath(req.Path)
+	target, err := ct.resolvePath(req.Path)
+	if err != nil {
+		return "", err
+	}
 	data, err := os.ReadFile(target)
 	if err != nil {
 		return "", fmt.Errorf("patch_file read: %w", err)

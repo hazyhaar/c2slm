@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -33,10 +34,68 @@ const (
 	ansiGray       = "\x1b[90m"
 )
 
+// runeDisplayWidth retourne la largeur d'affichage en colonnes d'un point de code Unicode.
+func runeDisplayWidth(r rune) int {
+	if r >= 0x20 && r < 0x7F {
+		return 1
+	}
+	if r < 0x20 || (r >= 0x7F && r < 0xA0) {
+		return 0
+	}
+	// Plages larges courantes (CJK, Emojis, Pictogrammes, Formes pleine largeur)
+	if (r >= 0x1100 && r <= 0x115F) ||
+		(r >= 0x2E80 && r <= 0xA4CF && r != 0x303F) ||
+		(r >= 0xAC00 && r <= 0xD7A3) ||
+		(r >= 0xF900 && r <= 0xFAFF) ||
+		(r >= 0xFE10 && r <= 0xFE19) ||
+		(r >= 0xFE30 && r <= 0xFE6F) ||
+		(r >= 0xFF01 && r <= 0xFF60) ||
+		(r >= 0xFFE0 && r <= 0xFFE6) ||
+		(r >= 0x1F000 && r <= 0x1FAFF) ||
+		(r >= 0x20000 && r <= 0x3FFFD) {
+		return 2
+	}
+	// Marques combinatoires et séparateurs nuls
+	if (r >= 0x0300 && r <= 0x036F) ||
+		(r >= 0x1AB0 && r <= 0x1AFF) ||
+		(r >= 0x1DC0 && r <= 0x1DFF) ||
+		(r >= 0x200B && r <= 0x200F) ||
+		(r >= 0xFE00 && r <= 0xFE0F) {
+		return 0
+	}
+	return 1
+}
+
+// stringDisplayWidth calcule la largeur totale d'affichage d'une chaîne UTF-8 en colonnes terminal.
+func stringDisplayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		w += runeDisplayWidth(r)
+	}
+	return w
+}
+
+// drainFd consomme de manière non-bloquante tous les octets résiduels dans le descripteur.
+func drainFd(fd int) {
+	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	for {
+		n, err := unix.Poll(fds, 0)
+		if err != nil || n <= 0 || (fds[0].Revents&unix.POLLIN) == 0 {
+			break
+		}
+		var discard [256]byte
+		nr, rerr := unix.Read(fd, discard[:])
+		if rerr != nil || nr == 0 {
+			break
+		}
+	}
+}
+
 // ChatBox implémente une interface TUI plein écran avec zone de saisie ancrée
 // EN BAS de la fenêtre du terminal (DECSTBM scroll region + alternate screen),
 // conforme aux standards des CLI conversationnels modernes (Claude Code, Ollama).
 type ChatBox struct {
+	mu           sync.Mutex
 	inFd         int
 	outFd        int
 	isTTY        bool
@@ -80,6 +139,12 @@ func NewChatBox() *ChatBox {
 }
 
 func (c *ChatBox) updateDimensions() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.updateDimensionsLocked()
+}
+
+func (c *ChatBox) updateDimensionsLocked() {
 	w, h, err := term.GetSize(c.inFd)
 	if err != nil || w <= 20 || h <= 10 {
 		c.width = 80
@@ -95,9 +160,22 @@ func (c *ChatBox) updateDimensions() {
 
 func (c *ChatBox) handleResize() {
 	for range c.sigWinch {
-		c.updateDimensions()
-		c.ApplyScrollRegion()
-		c.DrawChatBox("", false)
+		c.mu.Lock()
+		oldChatTop := c.chatTop
+		oldHeight := c.height
+
+		c.updateDimensionsLocked()
+
+		// Effacer les lignes de l'ancienne boîte pour supprimer tout dédoublement
+		if c.isTTY && oldChatTop > 0 && oldHeight > 0 {
+			for line := oldChatTop; line <= oldHeight; line++ {
+				fmt.Printf("\x1b[%d;1H\x1b[2K", line)
+			}
+		}
+
+		c.applyScrollRegionLocked()
+		c.drawChatBoxLocked("", false)
+		c.mu.Unlock()
 	}
 }
 
@@ -106,9 +184,12 @@ func (c *ChatBox) InitScreen(numLayers, maxTokens int) {
 	if !c.isTTY {
 		return
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	// Alternate screen (\x1b[?1049h), clear (\x1b[2J), curseur en haut (\x1b[H)
 	fmt.Print("\x1b[?1049h\x1b[2J\x1b[H")
-	c.ApplyScrollRegion()
+	c.applyScrollRegionLocked()
 
 	// Bannière affichée dans la zone de défilement supérieure
 	w := c.width
@@ -122,11 +203,17 @@ func (c *ChatBox) InitScreen(numLayers, maxTokens int) {
 	fmt.Printf("└%s┘%s\r\n\r\n", border, ansiReset)
 
 	// Dessine la chatbox ancrée tout en bas
-	c.DrawChatBox("", false)
+	c.drawChatBoxLocked("", false)
 }
 
 // ApplyScrollRegion configure la région matérielle de défilement (lignes 1 à scrollBottom).
 func (c *ChatBox) ApplyScrollRegion() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.applyScrollRegionLocked()
+}
+
+func (c *ChatBox) applyScrollRegionLocked() {
 	if !c.isTTY {
 		return
 	}
@@ -135,6 +222,8 @@ func (c *ChatBox) ApplyScrollRegion() {
 
 // ResetScreen restaure le terminal dans son état antérieur.
 func (c *ChatBox) ResetScreen() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !c.isTTY {
 		return
 	}
@@ -144,6 +233,12 @@ func (c *ChatBox) ResetScreen() {
 
 // DrawChatBox dessine la boîte de saisie ancrée en bas de l'écran.
 func (c *ChatBox) DrawChatBox(content string, isGenerating bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.drawChatBoxLocked(content, isGenerating)
+}
+
+func (c *ChatBox) drawChatBoxLocked(content string, isGenerating bool) {
 	if !c.isTTY {
 		return
 	}
@@ -151,58 +246,110 @@ func (c *ChatBox) DrawChatBox(content string, isGenerating bool) {
 	if w <= 10 {
 		return
 	}
-	// Sauvegarder la position du curseur
-	fmt.Print("\x1b[s")
+
+	// Masquer le curseur pendant le dessin de la boîte
+	fmt.Print("\x1b[?25l")
 
 	// Ligne 1 de la Chatbox (chatTop) : Bordure supérieure
+	// Format : ┌── + tag + ────── + ┐ (exactement w colonnes réelles)
 	fmt.Printf("\x1b[%d;1H\x1b[2K", c.chatTop)
 	if isGenerating {
 		tag := " 🤖 nanoGOqwen (Inférence en cours...) "
-		rem := w - 2 - len(tag)
+		tagWidth := stringDisplayWidth(tag)
+		rem := w - 3 - tagWidth - 1 // 3 pour "┌──", tagWidth, 1 pour "┐"
 		if rem < 0 {
 			rem = 0
 		}
-		fmt.Printf("%s┌──%s%s%s%s┐%s", ansiYellow, ansiBoldYellow, tag, ansiReset, ansiYellow, strings.Repeat("─", rem))
+		fmt.Printf("%s┌──%s%s%s%s%s┐%s", ansiYellow, ansiBoldYellow, tag, ansiReset, ansiYellow, strings.Repeat("─", rem), ansiReset)
 	} else {
 		tag := " 💬 Vous (/help, /clear, /tools, /stats, /exit) "
-		rem := w - 2 - len(tag)
+		tagWidth := stringDisplayWidth(tag)
+		rem := w - 3 - tagWidth - 1
 		if rem < 0 {
 			rem = 0
 		}
-		fmt.Printf("%s┌──%s%s%s%s┐%s", ansiCyan, ansiBoldCyan, tag, ansiReset, ansiCyan, strings.Repeat("─", rem))
+		fmt.Printf("%s┌──%s%s%s%s%s┐%s", ansiCyan, ansiBoldCyan, tag, ansiReset, ansiCyan, strings.Repeat("─", rem), ansiReset)
 	}
 
 	// Ligne 2 : Zone de saisie active
 	fmt.Printf("\x1b[%d;1H\x1b[2K", c.chatTop+1)
 	if isGenerating {
-		fmt.Printf("%s│%s %s⏳ Génération du modèle en streaming...%s%*s%s│%s",
-			ansiYellow, ansiReset, ansiDim, ansiReset, w-42, "", ansiYellow, ansiReset)
+		msg := " ⏳ Génération du modèle en streaming..."
+		msgWidth := stringDisplayWidth(msg)
+		rem := w - 1 - msgWidth - 1 // 1 bordure gauche '│', msgWidth, 1 bordure droite '│'
+		if rem < 0 {
+			rem = 0
+		}
+		fmt.Printf("%s│%s%s%s%*s%s│%s",
+			ansiYellow, ansiDim, msg, ansiReset, rem, "", ansiYellow, ansiReset)
 	} else {
-		fmt.Printf("%s│%s %s❯%s %-*s%s│%s",
-			ansiCyan, ansiReset, ansiBoldCyan, ansiReset, w-6, content, ansiCyan, ansiReset)
+		// "│ ❯ " = 4 colonnes d'affichage
+		availWidth := w - 4 - 1 // 1 pour la bordure droite '│'
+		if availWidth < 0 {
+			availWidth = 0
+		}
+
+		visibleContent := content
+		contentWidth := stringDisplayWidth(content)
+		if contentWidth > availWidth {
+			// Défilement horizontal automatique : on conserve la fin qui rentre dans availWidth
+			runes := []rune(content)
+			curW := 0
+			startIdx := len(runes)
+			for i := len(runes) - 1; i >= 0; i-- {
+				rw := runeDisplayWidth(runes[i])
+				if curW+rw > availWidth {
+					break
+				}
+				curW += rw
+				startIdx = i
+			}
+			visibleContent = string(runes[startIdx:])
+			contentWidth = curW
+		}
+
+		pad := availWidth - contentWidth
+		if pad < 0 {
+			pad = 0
+		}
+		fmt.Printf("%s│%s %s❯%s %s%*s%s│%s",
+			ansiCyan, ansiReset, ansiBoldCyan, ansiReset, visibleContent, pad, "", ansiCyan, ansiReset)
 	}
 
 	// Ligne 3 : Ligne de statut / raccourcis
+	// Format : └─ + status + ────── + ┘ (exactement w colonnes réelles)
 	fmt.Printf("\x1b[%d;1H\x1b[2K", c.chatTop+2)
 	if isGenerating {
 		status := " [Échap] Interrompre la génération immédiatement "
-		rem := w - 2 - len(status)
+		statusWidth := stringDisplayWidth(status)
+		rem := w - 2 - statusWidth - 1 // 2 pour "└─", statusWidth, 1 pour "┘"
 		if rem < 0 {
 			rem = 0
 		}
-		fmt.Printf("%s└─%s%s%s%s┘%s", ansiYellow, ansiBoldRed, status, ansiReset, ansiYellow, strings.Repeat("─", rem))
+		fmt.Printf("%s└─%s%s%s%s%s┘%s", ansiYellow, ansiBoldRed, status, ansiReset, ansiYellow, strings.Repeat("─", rem), ansiReset)
 	} else {
 		status := " [Échap] Interrompre │ [Entrée] Envoyer "
-		rem := w - 2 - len(status)
+		statusWidth := stringDisplayWidth(status)
+		rem := w - 2 - statusWidth - 1
 		if rem < 0 {
 			rem = 0
 		}
-		fmt.Printf("%s└─%s%s%s%s┘%s", ansiCyan, ansiGray, status, ansiReset, ansiCyan, strings.Repeat("─", rem))
+		fmt.Printf("%s└─%s%s%s%s%s┘%s", ansiCyan, ansiGray, status, ansiReset, ansiCyan, strings.Repeat("─", rem), ansiReset)
 	}
 
-	// Placer le curseur directement sur la ligne de saisie de la Chatbox
-	cursorCol := 5 + len([]rune(content))
-	fmt.Printf("\x1b[%d;%dH\x1b[?25h", c.chatTop+1, cursorCol)
+	if !isGenerating {
+		// Repositionnement précis du curseur matériel à la fin de la saisie visible
+		visibleWidth := stringDisplayWidth(content)
+		availWidth := w - 5
+		if visibleWidth > availWidth {
+			visibleWidth = availWidth
+		}
+		cursorCol := 1 + 4 + visibleWidth
+		if cursorCol >= w {
+			cursorCol = w - 1
+		}
+		fmt.Printf("\x1b[%d;%dH\x1b[?25h", c.chatTop+1, cursorCol)
+	}
 }
 
 // ReadPrompt attend la saisie utilisateur directement dans la Chatbox ancrée en bas.
@@ -214,6 +361,9 @@ func (c *ChatBox) ReadPrompt() (string, error) {
 		}
 		return strings.TrimSpace(c.scanner.Text()), nil
 	}
+
+	// Purger toute frappe résiduelle avant de démarrer la saisie
+	drainFd(c.inFd)
 
 	oldState, err := term.MakeRaw(c.inFd)
 	if err != nil {
@@ -228,14 +378,9 @@ func (c *ChatBox) ReadPrompt() (string, error) {
 	}()
 
 	var inputRunes []rune
-	promptRow := c.chatTop + 1
 
 	for {
 		c.DrawChatBox(string(inputRunes), false)
-
-		// Positionner le curseur exactement après "│ ❯ " (colonne 5 + offset)
-		cursorCol := 5 + len(string(inputRunes))
-		fmt.Printf("\x1b[%d;%dH\x1b[?25h", promptRow, cursorCol)
 
 		var buf [16]byte
 		nr, rErr := unix.Read(c.inFd, buf[:])
@@ -247,10 +392,12 @@ func (c *ChatBox) ReadPrompt() (string, error) {
 		switch buf[0] {
 		case '\r', '\n': // Validation
 			text := strings.TrimSpace(string(inputRunes))
+			c.mu.Lock()
 			// Effacer la saisie dans la chatbox
-			c.DrawChatBox("", false)
+			c.drawChatBoxLocked("", false)
 			// Positionner dans la zone de scroll pour afficher le message validé
 			fmt.Printf("\x1b[%d;1H\r\n%s❯ %s%s\r\n", c.scrollBottom, ansiBoldCyan, text, ansiReset)
+			c.mu.Unlock()
 			return text, nil
 
 		case 3: // Ctrl+C
@@ -304,11 +451,12 @@ func (c *ChatBox) BeginInference() (interrupted *atomic.Bool, endFn func()) {
 		return interrupted, func() {}
 	}
 
+	c.mu.Lock()
 	// Met à jour la chatbox en mode génération
-	c.DrawChatBox("", true)
-
+	c.drawChatBoxLocked("", true)
 	// Positionne le curseur dans la zone de scroll pour le streaming
-	fmt.Printf("\x1b[%d;1H", c.scrollBottom)
+	fmt.Printf("\x1b[%d;1H\x1b[?25h", c.scrollBottom)
+	c.mu.Unlock()
 
 	// Mode non-canonique et pas d'écho
 	raw := *c.origTermio
@@ -373,12 +521,16 @@ func (c *ChatBox) BeginInference() (interrupted *atomic.Bool, endFn func()) {
 		_ = stopW.Close()
 		_ = stopR.Close()
 
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
 		// Restaure le terminal
 		_ = unix.IoctlSetTermios(c.inFd, unix.TCSETSW, c.origTermio)
 		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, uintptr(c.inFd), 0x540b, 0) // TCFLSH
+		drainFd(c.inFd)
 
 		// Remet la chatbox en mode saisie
-		c.DrawChatBox("", false)
+		c.drawChatBoxLocked("", false)
 	}
 
 	return interrupted, endFn
@@ -386,6 +538,8 @@ func (c *ChatBox) BeginInference() (interrupted *atomic.Bool, endFn func()) {
 
 // PrintAssistantHeader prépare la réponse dans la zone de défilement haute.
 func (c *ChatBox) PrintAssistantHeader() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.isTTY {
 		fmt.Printf("\x1b[%d;1H\r\n%s◇ nanoGOqwen%s\r\n", c.scrollBottom, ansiBoldMag, ansiReset)
 	} else {
@@ -395,6 +549,8 @@ func (c *ChatBox) PrintAssistantHeader() {
 
 // PrintToolCall affiche l'appel d'outil dans la zone haute.
 func (c *ChatBox) PrintToolCall(name, args string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.isTTY {
 		fmt.Printf("\r\n%s┌ ⚙️  [%s]%s %s\r\n", ansiYellow, name, ansiReset, args)
 	} else {
@@ -404,6 +560,8 @@ func (c *ChatBox) PrintToolCall(name, args string) {
 
 // PrintToolResult affiche le résultat de l'outil dans la zone haute.
 func (c *ChatBox) PrintToolResult(output string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	preview := output
 	if len(preview) > 100 {
 		preview = preview[:100] + "..."
@@ -417,6 +575,8 @@ func (c *ChatBox) PrintToolResult(output string) {
 
 // PrintAssistantFooter affiche les métriques de fin de génération.
 func (c *ChatBox) PrintAssistantFooter(interrupted bool, totalTokens int, elapsed time.Duration, seqLen, maxTokens int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if interrupted {
 		if c.isTTY {
 			fmt.Printf("\r\n%s⏹  [Inférence interrompue par l'utilisateur (ESC)]%s\r\n", ansiBoldRed, ansiReset)
@@ -449,7 +609,9 @@ func (c *ChatBox) PrintAssistantFooter(interrupted bool, totalTokens int, elapse
 
 // PrintHelp affiche l'aide dans la zone de défilement haute.
 func (c *ChatBox) PrintHelp() {
-	c.ApplyScrollRegion()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.applyScrollRegionLocked()
 	msg := fmt.Sprintf("\r\n%sCommandes disponibles :%s\r\n"+
 		"  %s/help%s      : Affiche ce menu d'aide\r\n"+
 		"  %s/clear%s     : Réinitialise le KV Cache à zéro (vide le contexte passé)\r\n"+

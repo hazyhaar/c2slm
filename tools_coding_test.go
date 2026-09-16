@@ -141,3 +141,40 @@ func TestCodingTools_FetchURL(t *testing.T) {
 		t.Errorf("FetchURL did not decode html entities: %s", text)
 	}
 }
+
+func TestCodingTools_PathJail(t *testing.T) {
+	tmpDir := t.TempDir()
+	reg := NewToolRegistry()
+	ct, err := RegisterCodingTools(reg, tmpDir)
+	if err != nil {
+		t.Fatalf("RegisterCodingTools: %v", err)
+	}
+
+	// 1. Rejet d'un chemin absolu sortant de la racine
+	absEscapeArgs, _ := json.Marshal(map[string]any{
+		"path": "/etc/passwd",
+	})
+	if _, err := ct.ReadFile(absEscapeArgs); err == nil {
+		t.Error("ReadFile doit échouer sur un chemin absolu externe (/etc/passwd)")
+	}
+
+	// 2. Rejet d'un chemin relatif avec traversée ascendante (../)
+	relEscapeArgs, _ := json.Marshal(map[string]any{
+		"path":    "../../shadow",
+		"content": "tentative escape",
+	})
+	if _, err := ct.WriteFile(relEscapeArgs); err == nil {
+		t.Error("WriteFile doit échouer sur une traversée ascendante (../../shadow)")
+	}
+
+	// 3. Rejet dans PatchFile
+	patchEscapeArgs, _ := json.Marshal(map[string]any{
+		"path":                "../outside.txt",
+		"target_content":      "a",
+		"replacement_content": "b",
+	})
+	if _, err := ct.PatchFile(patchEscapeArgs); err == nil {
+		t.Error("PatchFile doit échouer sur un chemin relatif sortant")
+	}
+}
+

@@ -263,9 +263,8 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 				chatBox.PrintToolResult(toolOutput)
 			}
 
-			// Réinjection du résultat sous <tool_response> dans le KV Cache
-			respChunk := fmt.Sprintf("<tool_call>\n%s\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n%s\n</tool_response><|im_end|>\n<|im_start|>assistant\n",
-				strings.TrimSpace(rawToolCall), toolOutput)
+			// Réinjection du résultat sous <tool_response> dans le KV Cache sans dupliquer <tool_call>
+			respChunk := fmt.Sprintf("<|im_end|>\n<|im_start|>user\n<tool_response>\n%s\n</tool_response><|im_end|>\n<|im_start|>assistant\n", toolOutput)
 			currentDelta = engine.Tokenizer.Encode(respChunk)
 		}
 

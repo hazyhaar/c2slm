@@ -177,6 +177,11 @@ func (e *Engine) generate(lastNormX []float32, currentPos, maxNewTokens int, sto
 
 		if onToken != nil {
 			if !onToken(piece) {
+				// Persister le jeton courant dans le KV-cache avant l'arrêt
+				lastNormX = engine.Forward(e.Model, e.KVCache, e.Arena, bestID, currentPos)
+				e.KVCache.StoreTokenID(currentPos, bestID)
+				currentPos++
+				e.KVCache.SeqLen = currentPos
 				break
 			}
 		}

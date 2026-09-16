@@ -3,6 +3,7 @@ package c2slm
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -165,3 +166,21 @@ func TestToolCallTurn(t *testing.T) {
 		t.Fatalf("tour outil = %q, attendu %q", turn, want)
 	}
 }
+
+func TestSessionToolResponseTurn(t *testing.T) {
+	// En mode session, <tool_call> est déjà persisté dans le KV-cache par le modèle.
+	// La réinjection du résultat ne doit contenir QUE la clôture et la réponse sans répéter <tool_call>.
+	toolOutput := `{"status":"ok"}`
+	sessionResp := fmt.Sprintf("<|im_end|>\n<|im_start|>user\n<tool_response>\n%s\n</tool_response><|im_end|>\n<|im_start|>assistant\n", toolOutput)
+
+	if strings.Contains(sessionResp, "<tool_call>") {
+		t.Error("la réponse de session ne doit pas dupliquer la balise <tool_call>")
+	}
+	if !strings.HasPrefix(sessionResp, "<|im_end|>\n<|im_start|>user\n<tool_response>\n") {
+		t.Errorf("en-tête de réponse de session invalide: %q", sessionResp)
+	}
+	if !strings.HasSuffix(sessionResp, "\n</tool_response><|im_end|>\n<|im_start|>assistant\n") {
+		t.Errorf("clôture de réponse de session invalide: %q", sessionResp)
+	}
+}
+
