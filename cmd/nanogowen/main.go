@@ -13,8 +13,8 @@ import (
 	"github.com/hazyhaar/c2slm"
 )
 
-const defaultModelPath = "/data/models/qwen3-1.7b-gguf/Qwen_Qwen3-1.7B-Q4_K_M.gguf"
-const defaultSystemPrompt = "Tu es nanoGOqwen, propulsé par Qwen 3 1.7B et un inféreur 100% pur Go sans CGo ni Wasm. Réponds en français de manière claire, concise et précise."
+const defaultModelPath = "/data/models/qwen2.5-0.5b-gguf/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+const defaultSystemPrompt = "Tu es nanoGOqwen, un modèle de langage compact propulsé par un inféreur 100% pur Go sans runtime CGo ni Wasm. Réponds en français de manière claire, concise et directe."
 
 func main() {
 	modelPath := flag.String("model", defaultModelPath, "Chemin vers le fichier de poids GGUF")
