@@ -82,7 +82,6 @@ func ProfileSingleStep(m *engine.Model, cache *engine.KVCache, a *engine.Arena, 
 		scale = float32(1.0 / 11.3137)
 	}
 	kvHeads := m.NumKVHeads
-	qPerKV := m.NumHeads / kvHeads
 
 	tLayersStart := time.Now()
 	for lIdx := 0; lIdx < m.NumLayers; lIdx++ {
@@ -137,31 +136,7 @@ func ProfileSingleStep(m *engine.Model, cache *engine.KVCache, a *engine.Arena, 
 
 		// Multi-Head Attention
 		tAttn := time.Now()
-		for h := 0; h < m.NumHeads; h++ {
-			kvHead := h / qPerKV
-			qHead := a.Q[h*headDim : (h+1)*headDim]
-
-			for p := 0; p <= pos; p++ {
-				kVec := cache.GetKey(lIdx, kvHead, p)
-				var dot float32
-				for d := 0; d < headDim; d++ {
-					dot += qHead[d] * kVec[d]
-				}
-				a.AttnScores[p] = dot * scale
-			}
-
-			tensor.Softmax(a.AttnScores[:pos+1])
-
-			outHead := a.AttnOut[h*headDim : (h+1)*headDim]
-			for d := 0; d < headDim; d++ {
-				var val float32
-				for p := 0; p <= pos; p++ {
-					vVec := cache.GetValue(lIdx, kvHead, p)
-					val += a.AttnScores[p] * vVec[d]
-				}
-				outHead[d] = val
-			}
-		}
+		engine.DispatchAttention(a.Pool, a.AttnScores, cache, lIdx, pos, a.Q, a.AttnOut, m.NumHeads, kvHeads, headDim, scale)
 		prof.LayerBreakdown.AttentionDuration += time.Since(tAttn)
 
 		// Output projection W_o
@@ -268,8 +243,9 @@ func main() {
 	fmt.Printf("  SONDE KERNEL UNIX & PROFILING MATÉRIEL C2SLM\n")
 	fmt.Printf("================================================================================\n")
 	fmt.Printf("Modèle: %s\n", *modelPath)
-	fmt.Printf("Architecture: %d couches, dim=%d, ffn_dim=%d, vocab=%d\n",
-		eng.Model.NumLayers, eng.Model.EmbdLength, eng.Model.FFNDim, eng.Model.VocabSize)
+	fmt.Printf("Architecture: %d couches, dim=%d, ffn_dim=%d, vocab=%d, heads=%d, kv_heads=%d, head_dim=%d\n",
+		eng.Model.NumLayers, eng.Model.EmbdLength, eng.Model.FFNDim, eng.Model.VocabSize,
+		eng.Model.NumHeads, eng.Model.NumKVHeads, eng.Model.HeadDim)
 	fmt.Printf("CPUs physiques / Goroutines Pool: %d workers\n", eng.Arena.Pool.NumWorkers())
 	fmt.Printf("Temps de chargement initial (mmap): %v\n", loadDuration)
 	fmt.Printf("RSS après chargement: %d Mo (Soft Faults: %d, Hard Faults I/O: %d)\n\n",

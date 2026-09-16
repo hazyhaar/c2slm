@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"github.com/hazyhaar/c2slm/gguf"
+	"github.com/hazyhaar/c2slm/internal/simd"
 	"github.com/hazyhaar/c2slm/tensor"
 )
 
@@ -57,7 +58,6 @@ func Forward(m *Model, cache *KVCache, a *Arena, tokenID int32, pos int) []float
 	headDim := m.HeadDim
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
 	kvHeads := m.NumKVHeads
-	qPerKV := m.NumHeads / kvHeads // 14 / 2 = 7
 
 	// 2. Loop through all 24 Transformer layers
 	for lIdx := 0; lIdx < m.NumLayers; lIdx++ {
@@ -103,34 +103,7 @@ func Forward(m *Model, cache *KVCache, a *Arena, tokenID int32, pos int) []float
 		cache.StoreKV(lIdx, pos, a.K, a.V)
 
 		// Multi-Head Attention with Grouped-Query Attention (14:2)
-		for h := 0; h < m.NumHeads; h++ {
-			kvHead := h / qPerKV
-			qHead := a.Q[h*headDim : (h+1)*headDim]
-
-			// Compute dot product scores for all past and current tokens
-			for p := 0; p <= pos; p++ {
-				kVec := cache.GetKey(lIdx, kvHead, p)
-				var dot float32
-				for d := 0; d < headDim; d++ {
-					dot += qHead[d] * kVec[d]
-				}
-				a.AttnScores[p] = dot * scale
-			}
-
-			// Softmax over scores
-			tensor.Softmax(a.AttnScores[:pos+1])
-
-			// Weighted sum of values
-			outHead := a.AttnOut[h*headDim : (h+1)*headDim]
-			for d := 0; d < headDim; d++ {
-				var val float32
-				for p := 0; p <= pos; p++ {
-					vVec := cache.GetValue(lIdx, kvHead, p)
-					val += a.AttnScores[p] * vVec[d]
-				}
-				outHead[d] = val
-			}
-		}
+		DispatchAttention(a.Pool, a.AttnScores, cache, lIdx, pos, a.Q, a.AttnOut, m.NumHeads, kvHeads, headDim, scale)
 
 		// Output projection W_o
 		DispatchGEMV(a.Pool, a.Down, layer.AttnOut, a.AttnOut, m.EmbdLength, m.EmbdLength)
@@ -162,6 +135,36 @@ func Forward(m *Model, cache *KVCache, a *Arena, tokenID int32, pos int) []float
 	tensor.RMSNorm(a.NormX, a.X, m.OutputNorm, m.RMSNormEps)
 
 	return a.NormX
+}
+
+// attentionHead computes one query head against its Grouped-Query KV head:
+// scaled Q@K scores, softmax, then the weighted sum Attn@V. Both products are
+// delegated to the AVX2 micro-kernels; scores is caller-owned scratch.
+func attentionHead(cache *KVCache, layer, pos int, q, out []float32, h, qPerKV, headDim int, scale float32, scores []float32) {
+	kvHead := h / qPerKV
+	qHead := q[h*headDim : (h+1)*headDim]
+
+	kOff := cache.getOffset(false, layer, kvHead, 0)
+	vOff := cache.getOffset(true, layer, kvHead, 0)
+
+	simd.C2_tensor_attn_qk(qHead, cache.Data[kOff:], pos, headDim, scale, scores, headDim)
+	tensor.Softmax(scores[:pos+1])
+
+	outHead := out[h*headDim : (h+1)*headDim]
+	simd.C2_tensor_attn_av(scores, cache.Data[vOff:], pos, headDim, outHead, headDim)
+}
+
+// DispatchAttention runs attention with the pool when available, falling back
+// to a sequential head loop on the caller-owned scratch otherwise.
+func DispatchAttention(pool *WorkerPool, scratch []float32, cache *KVCache, layer, pos int, q, out []float32, numHeads, kvHeads, headDim int, scale float32) {
+	if pool != nil {
+		pool.ParallelAttention(scratch, cache, layer, pos, q, out, numHeads, kvHeads, headDim, scale)
+		return
+	}
+	qPerKV := numHeads / kvHeads
+	for h := 0; h < numHeads; h++ {
+		attentionHead(cache, layer, pos, q, out, h, qPerKV, headDim, scale, scratch[:pos+1])
+	}
 }
 
 // ComputeLogits projects final hidden states to vocabulary logits (or restricted tokens)

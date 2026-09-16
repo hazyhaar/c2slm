@@ -256,8 +256,16 @@ func NewRoPETable(maxLen, headDim int, theta float32) *RoPETable {
 	}
 }
 
-// Apply applies precomputed RoPE to vec for pos.
+// Apply applies precomputed RoPE to vec for pos. A position outside the
+// precomputed table is rejected, so an out-of-range pos can neither read past
+// the cosine/sine tables nor write past the vector.
 func (t *RoPETable) Apply(vec []float32, numHeads, pos int) {
+	if t == nil || pos < 0 || pos >= t.MaxLen {
+		return
+	}
+	if numHeads <= 0 || numHeads*t.HeadDim > len(vec) {
+		return
+	}
 	pOffset := pos * t.HalfDim
 	cosSlice := t.Cos[pOffset : pOffset+t.HalfDim]
 	sinSlice := t.Sin[pOffset : pOffset+t.HalfDim]

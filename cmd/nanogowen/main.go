@@ -60,6 +60,24 @@ func formatChatML(system, user string) string {
 	return b.String()
 }
 
+// formatSystemPrefix is the unique, immutable ChatML prefix materialized once
+// at session start and never recomputed afterwards.
+func formatSystemPrefix(system string) string {
+	return "<|im_start|>system\n" + system + "<|im_end|>\n"
+}
+
+// formatUserTurn is the per-turn delta: only the new user message and the
+// assistant header are appended to the ongoing KV cache.
+func formatUserTurn(user string) string {
+	return "<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n"
+}
+
+// prefillSystem materializes the system prompt in the KV cache from position 0.
+func prefillSystem(engine *c2slm.Engine, system string) {
+	tokens := engine.Tokenizer.Encode(formatSystemPrefix(system))
+	engine.IngestFrom(0, tokens)
+}
+
 func runSinglePrompt(engine *c2slm.Engine, system, user string, maxTokens int, stopStrings []string) {
 	fullPrompt := formatChatML(system, user)
 	fmt.Printf("[Utilisateur]: %s\n", user)
@@ -100,6 +118,11 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 	fmt.Println("Tapez votre message et appuyez sur [Entrée]. Entrez 'exit' ou 'quit' pour fermer.")
 	fmt.Println("--------------------------------------------------------------------------------")
 
+	// The system prompt is materialized exactly once; every later turn appends
+	// only its delta, so the cached prefix is never recomputed.
+	prefillSystem(engine, system)
+	fmt.Printf("[préfixe système matérialisé: %d jetons en cache]\n", engine.KVCache.SeqLen)
+
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print("\n> ")
@@ -115,7 +138,16 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 			break
 		}
 
-		fullPrompt := formatChatML(system, line)
+		deltaTokens := engine.Tokenizer.Encode(formatUserTurn(line))
+
+		// Context saturation is the only case that legitimately discards the
+		// cache: re-anchor on the system prefix and replay the current turn.
+		if engine.KVCache.SeqLen+len(deltaTokens) >= engine.KVCache.MaxTokens {
+			fmt.Println("\n[contexte saturé: réancrage du préfixe système]")
+			engine.KVCache.Reset()
+			prefillSystem(engine, system)
+		}
+
 		fmt.Print("\n[nanoGOqwen]: ")
 
 		tokenCount := 0
@@ -124,7 +156,7 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 		var m1, m2 runtime.MemStats
 		runtime.ReadMemStats(&m1)
 
-		_, err := engine.GenerateStream(fullPrompt, maxTokens, stopStrings, func(piece string) bool {
+		_, err := engine.GenerateStreamSession(deltaTokens, maxTokens, stopStrings, func(piece string) bool {
 			fmt.Print(piece)
 			tokenCount++
 			return true
@@ -144,7 +176,8 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 		}
 		mallocs := m2.Mallocs - m1.Mallocs
 		bytesAlloc := m2.TotalAlloc - m1.TotalAlloc
-		fmt.Printf("[%d jetons en %v (%.2f tok/s) | %d allocs (%d octets)]\n",
-			tokenCount, elapsed.Round(time.Millisecond), tps, mallocs, bytesAlloc)
+		fmt.Printf("[%d jetons en %v (%.2f tok/s) | %d allocs (%d octets) | cache=%d/%d]\n",
+			tokenCount, elapsed.Round(time.Millisecond), tps, mallocs, bytesAlloc,
+			engine.KVCache.SeqLen, engine.KVCache.MaxTokens)
 	}
 }

@@ -9,6 +9,11 @@ import (
 	"github.com/hazyhaar/c2slm/tensor"
 )
 
+// defaultRoPEBaseQwen3 is Qwen3's native RoPE frequency base (1e6). At a 16k
+// context the sequence stays inside the 32k training window, so the table is
+// built straight from this base with no RoPE scaling.
+const defaultRoPEBaseQwen3 float32 = 1_000_000.0
+
 // Layer contains all mapped weights and biases for one Transformer block
 type Layer struct {
 	Index     int
@@ -96,7 +101,7 @@ func LoadModel(path string) (*Model, error) {
 		ropeTheta, _ = gf.GetFloat32("qwen3.rope.freq_base")
 	}
 	if ropeTheta == 0 {
-		ropeTheta = 1000000.0
+		ropeTheta = defaultRoPEBaseQwen3
 	}
 	eps, _ := gf.GetFloat32("qwen2.attention.layer_norm_rms_epsilon")
 	if eps == 0 {
