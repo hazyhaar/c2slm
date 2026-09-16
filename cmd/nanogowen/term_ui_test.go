@@ -43,8 +43,10 @@ func TestChatBox_BannerAndFooters(t *testing.T) {
 		os.Stdout = oldStdout
 	}()
 
-	cb.PrintBanner("test-model", 28, 16384)
+	cb.PrintBanner(28, 16384)
 	cb.PrintAssistantHeader()
+	cb.PrintToolCall("fetch_url", `{"url":"https://go.dev"}`)
+	cb.PrintToolResult("Documentation Go 1.27")
 	cb.PrintAssistantFooter(false, 42, 1500*time.Millisecond, 150, 16384)
 	cb.PrintAssistantFooter(true, 10, 500*time.Millisecond, 160, 16384)
 

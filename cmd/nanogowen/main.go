@@ -124,7 +124,7 @@ func runSinglePrompt(engine *c2slm.Engine, system, user string, maxTokens int, s
 
 func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stopStrings []string) {
 	chatBox := NewChatBox()
-	chatBox.PrintBanner("nanoGOqwen", engine.Model.NumLayers, engine.KVCache.MaxTokens)
+	chatBox.PrintBanner(engine.Model.NumLayers, engine.KVCache.MaxTokens)
 
 	// Initialisation des outils de codage, de fichiers et de recherche web
 	toolReg := c2slm.NewToolRegistry()
@@ -136,8 +136,6 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 	// The system prompt is materialized exactly once; every later turn appends
 	// only its delta, so the cached prefix is never recomputed.
 	prefillSystem(engine, system, toolReg)
-	fmt.Printf("[préfixe système matérialisé: %d jetons en cache | %d outils actifs]\n",
-		engine.KVCache.SeqLen, toolReg.Len())
 
 	for {
 		line, readErr := chatBox.ReadPrompt()
@@ -152,16 +150,40 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 		if line == "" {
 			continue
 		}
-		if line == "exit" || line == "quit" {
+
+		// Gestion des commandes slash
+		switch strings.ToLower(line) {
+		case "exit", "quit", "/exit", "/quit":
 			fmt.Println("Fermeture de nanoGOqwen.")
-			break
+			return
+		case "/help":
+			chatBox.PrintHelp()
+			continue
+		case "/clear", "/reset":
+			engine.KVCache.Reset()
+			prefillSystem(engine, system, toolReg)
+			fmt.Printf("%s[KV Cache réinitialisé : contexte remis à zéro]%s\n", ansiGreen, ansiReset)
+			continue
+		case "/tools":
+			fmt.Printf("\n%sOutils enregistrés (%d) :%s\n", ansiBold, toolReg.Len(), ansiReset)
+			for _, def := range toolReg.Definitions() {
+				fmt.Printf("  %s• %-14s%s : %s\n", ansiYellow, def.Name, ansiReset, def.Description)
+			}
+			fmt.Println()
+			continue
+		case "/stats", "/context":
+			used := engine.KVCache.SeqLen
+			total := engine.KVCache.MaxTokens
+			pct := float64(used) / float64(total) * 100.0
+			fmt.Printf("\n%sContexte KV Cache :%s %d / %d jetons (%.1f%% occupé)\n\n", ansiBold, ansiReset, used, total, pct)
+			continue
 		}
 
 		deltaTokens := engine.Tokenizer.Encode(formatUserTurn(line))
 
 		// Context saturation check
 		if engine.KVCache.SeqLen+len(deltaTokens) >= engine.KVCache.MaxTokens {
-			fmt.Println("\n[contexte saturé: réancrage du préfixe système]")
+			fmt.Printf("\n%s[contexte saturé: réancrage du préfixe système]%s\n", ansiYellow, ansiReset)
 			engine.KVCache.Reset()
 			prefillSystem(engine, system, toolReg)
 		}
@@ -224,17 +246,13 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 				break
 			}
 
-			fmt.Printf("\n⚙️ [Appel d'outil: %s(%s)]\n", call.Name, string(call.Arguments))
+			chatBox.PrintToolCall(call.Name, string(call.Arguments))
 			toolOutput, dispatchErr := toolReg.Dispatch(call.Name, call.Arguments)
 			if dispatchErr != nil {
 				toolOutput = fmt.Sprintf(`{"error": %q}`, dispatchErr.Error())
-				fmt.Printf("⚠️ [Erreur exécution outil: %v]\n", dispatchErr)
+				fmt.Printf("%s⚠️  [Erreur outil: %v]%s\n", ansiRed, dispatchErr, ansiReset)
 			} else {
-				preview := toolOutput
-				if len(preview) > 120 {
-					preview = preview[:120] + "..."
-				}
-				fmt.Printf("📥 [Résultat reçu (%d octets): %s]\n", len(toolOutput), preview)
+				chatBox.PrintToolResult(toolOutput)
 			}
 
 			// Réinjection du résultat sous <tool_response> dans le KV Cache
