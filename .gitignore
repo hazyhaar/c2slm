@@ -1,0 +1,13 @@
+# Binaries
+nanogowen
+*.test
+*.exe
+*.so
+*.a
+
+# Model weights
+*.gguf
+*.bin
+
+# Temporary
+.DS_Store
