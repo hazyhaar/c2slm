@@ -1,6 +1,6 @@
 # Binaries
 /nanogowen
-/bin/nanogowen
+/bin/
 *.test
 *.exe
 *.so
@@ -10,5 +10,7 @@
 *.gguf
 *.bin
 
-# Temporary
+# Temporary & Work files
 .DS_Store
+*.work
+
