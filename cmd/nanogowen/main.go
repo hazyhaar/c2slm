@@ -14,7 +14,10 @@ import (
 )
 
 const defaultModelPath = "/data/models/qwen2.5-0.5b-gguf/qwen2.5-0.5b-instruct-q4_k_m.gguf"
-const defaultSystemPrompt = "Tu es nanoGOqwen, un modèle de langage compact propulsé par un inféreur 100% pur Go sans runtime CGo ni Wasm. Réponds en français de manière claire et concise."
+const defaultSystemPrompt = "Tu es nanoGOqwen, un assistant autonome propulsé par un inféreur 100% pur Go.\n" +
+	"DIRECTIVES D'EXÉCUTION :\n" +
+	"Tu as accès aux outils déclarés ci-dessous. Dès que l'utilisateur te demande une information externe, une recherche web, la lecture ou modification d'un fichier, ou une commande bash, tu DOIS IMMÉDIATEMENT appeler l'outil correspondant avec la balise <tool_call>.\n" +
+	"Ne dis JAMAIS que tu n'as pas accès à internet ou aux fichiers : utilise l'outil adéquat sans émettre de refus préalable."
 
 func main() {
 	modelPath := flag.String("model", defaultModelPath, "Chemin vers le fichier de poids GGUF")

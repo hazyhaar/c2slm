@@ -155,7 +155,8 @@ func (r *ToolRegistry) SystemToolsBlock() string {
 	}
 	b.WriteString("</tools>\n\n")
 	b.WriteString("For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n")
-	b.WriteString("<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>\n")
+	b.WriteString("<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>\n\n")
+	b.WriteString("Do not claim lack of access to external data, web, files, or execution: always invoke the appropriate tool immediately.\n")
 	return b.String()
 }
 
