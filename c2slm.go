@@ -62,9 +62,12 @@ func (e *Engine) GenerateStream(prompt string, maxNewTokens int, stopStrings []s
 	if len(promptTokens) == 0 {
 		return "", fmt.Errorf("empty prompt tokens")
 	}
+	if len(promptTokens) >= engine.MaxContextLen {
+		return "", fmt.Errorf("prompt (%d) exceeds max context (%d)",
+			len(promptTokens), engine.MaxContextLen)
+	}
 	if len(promptTokens)+maxNewTokens > engine.MaxContextLen {
-		return "", fmt.Errorf("prompt (%d) + new tokens (%d) exceeds max context (%d)",
-			len(promptTokens), maxNewTokens, engine.MaxContextLen)
+		maxNewTokens = engine.MaxContextLen - len(promptTokens)
 	}
 
 	// Reset KV cache for clean inference sequence

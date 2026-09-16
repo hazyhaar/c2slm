@@ -1,7 +1,7 @@
 package engine
 
-// MaxContextLen is the maximum supported sequence length for DNS arbitration
-const MaxContextLen = 512
+// MaxContextLen is the maximum supported sequence length for inference
+const MaxContextLen = 2048
 
 // KVCache holds contiguous Key and Value state for all layers
 // Size: 2 * 24 layers * 2 kvHeads * 512 tokens * 64 headDim * 4 bytes = 12,582,912 bytes

@@ -1,5 +1,6 @@
 # Binaries
-nanogowen
+/nanogowen
+/bin/nanogowen
 *.test
 *.exe
 *.so
