@@ -1,9 +1,10 @@
 package main
 
 import (
-	"bufio"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"strings"
@@ -122,9 +123,8 @@ func runSinglePrompt(engine *c2slm.Engine, system, user string, maxTokens int, s
 }
 
 func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stopStrings []string) {
-	fmt.Println("=== Session interactive nanoGOqwen (Pur Go) ===")
-	fmt.Println("Tapez votre message et appuyez sur [Entrée]. Entrez 'exit' ou 'quit' pour fermer.")
-	fmt.Println("--------------------------------------------------------------------------------")
+	chatBox := NewChatBox()
+	chatBox.PrintBanner("nanoGOqwen", engine.Model.NumLayers, engine.KVCache.MaxTokens)
 
 	// Initialisation des outils de codage, de fichiers et de recherche web
 	toolReg := c2slm.NewToolRegistry()
@@ -139,13 +139,16 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 	fmt.Printf("[préfixe système matérialisé: %d jetons en cache | %d outils actifs]\n",
 		engine.KVCache.SeqLen, toolReg.Len())
 
-	scanner := bufio.NewScanner(os.Stdin)
 	for {
-		fmt.Print("\n> ")
-		if !scanner.Scan() {
+		line, readErr := chatBox.ReadPrompt()
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				fmt.Println("\nFermeture de nanoGOqwen.")
+			} else {
+				fmt.Fprintf(os.Stderr, "\nErreur de saisie: %v\n", readErr)
+			}
 			break
 		}
-		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
@@ -163,10 +166,11 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 			prefillSystem(engine, system, toolReg)
 		}
 
-		fmt.Print("\n[nanoGOqwen]: ")
+		chatBox.PrintAssistantHeader()
 
 		totalTokens := 0
 		turnStart := time.Now()
+		wasInterrupted := false
 
 		// Boucle multi-tours pour supporter les appels d'outils successifs
 		currentDelta := deltaTokens
@@ -175,7 +179,12 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 			var rawToolCall string
 			hasToolCall := false
 
+			interrupted, cancelInference := chatBox.BeginInference()
+
 			_, err := engine.GenerateStreamSession(currentDelta, maxTokens, stopStrings, func(piece string) bool {
+				if interrupted.Load() {
+					return false
+				}
 				done, _, clean := toolScan.Push(piece)
 				if clean != "" {
 					fmt.Print(clean)
@@ -188,6 +197,16 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 				}
 				return true
 			})
+
+			cancelInference()
+
+			if interrupted.Load() {
+				wasInterrupted = true
+				// Scellement défensif d'imEnd dans le KV cache pour fermer proprement le tour assistant
+				_, imEnd, _ := engine.Tokenizer.SpecialTokenIDs()
+				engine.IngestFrom(engine.KVCache.SeqLen, []int32{imEnd})
+				break
+			}
 
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "\nErreur d'inférence: %v\n", err)
@@ -225,14 +244,6 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 		}
 
 		elapsed := time.Since(turnStart)
-		fmt.Println()
-
-		tps := 0.0
-		if elapsed.Seconds() > 0 && totalTokens > 0 {
-			tps = float64(totalTokens) / elapsed.Seconds()
-		}
-		fmt.Printf("[%d jetons en %v (%.2f tok/s) | cache=%d/%d]\n",
-			totalTokens, elapsed.Round(time.Millisecond), tps,
-			engine.KVCache.SeqLen, engine.KVCache.MaxTokens)
+		chatBox.PrintAssistantFooter(wasInterrupted, totalTokens, elapsed, engine.KVCache.SeqLen, engine.KVCache.MaxTokens)
 	}
 }
