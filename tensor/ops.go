@@ -148,12 +148,22 @@ func DotQ4_K_Q8_K(weight []byte, q8k []byte, cols int) float32 {
 }
 
 // GEMVQ4_K_Q8_KRange performs y = W * x for rows in [startRow, endRow) where W is in Q4_K and x is in Q8_K.
+// Processes rows pairwise using fused GEMV2 kernel (reusing activation registers in L1D/AVX2).
 func GEMVQ4_K_Q8_KRange(y []float32, weight []byte, q8k []byte, startRow, endRow, cols int) {
 	rowBytes := (cols / QK4_K) * BlockSizeQ4_K
-	for r := startRow; r < endRow; r++ {
+	r := startRow
+	for ; r+1 < endRow; r += 2 {
+		rowOffset0 := r * rowBytes
+		rowOffset1 := (r + 1) * rowBytes
+		simd.C2_tensor_gemv2_q4_k_q8_k(
+			weight[rowOffset0:rowOffset0+rowBytes],
+			weight[rowOffset1:rowOffset1+rowBytes],
+			q8k, cols, &y[r], &y[r+1],
+		)
+	}
+	if r < endRow {
 		rowOffset := r * rowBytes
-		rowWeight := weight[rowOffset : rowOffset+rowBytes]
-		y[r] = DotQ4_K_Q8_K(rowWeight, q8k, cols)
+		y[r] = DotQ4_K_Q8_K(weight[rowOffset:rowOffset+rowBytes], q8k, cols)
 	}
 }
 

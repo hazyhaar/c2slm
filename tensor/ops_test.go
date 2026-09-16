@@ -125,5 +125,47 @@ func TestGEMVKernels_ZeroAllocation(t *testing.T) {
 		t.Fatalf("GEMVQ6_K allocated %f objects per run, want 0", allocsQ6_K)
 	}
 
-	t.Logf("All GEMV kernels (Q5_0, Q8_0, Q4_K, Q6_K) validated at EXACTLY 0 alloc/op!")
+	// Q4_K_Q8_K (with GEMV2 dual-row fused)
+	rowBytesQ4_K_Q8 := (cols / tensor.QK4_K) * tensor.BlockSizeQ4_K
+	wQ4_K_Q8 := make([]byte, rows*rowBytesQ4_K_Q8)
+	q8k := make([]byte, (cols/256)*tensor.BlockSizeQ8_K)
+	tensor.QuantizeRowQ8_K(x, q8k, cols)
+	allocsQ4_K_Q8 := testing.AllocsPerRun(20, func() {
+		tensor.GEMVQ4_K_Q8_K(y, wQ4_K_Q8, q8k, rows, cols)
+	})
+	if allocsQ4_K_Q8 != 0 {
+		t.Fatalf("GEMVQ4_K_Q8_K allocated %f objects per run, want 0", allocsQ4_K_Q8)
+	}
+
+	t.Logf("All GEMV kernels (Q5_0, Q8_0, Q4_K, Q6_K, Q4_K_Q8_K) validated at EXACTLY 0 alloc/op!")
+}
+
+func BenchmarkGEMVQ4_K_Q8_K_Cols896(b *testing.B) {
+	const cols = 896
+	const rows = 128
+	w := make([]byte, rows*(cols/tensor.QK4_K)*tensor.BlockSizeQ4_K)
+	x := make([]float32, cols)
+	q8k := make([]byte, (cols/256)*tensor.BlockSizeQ8_K)
+	y := make([]float32, rows)
+	tensor.QuantizeRowQ8_K(x, q8k, cols)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tensor.GEMVQ4_K_Q8_K(y, w, q8k, rows, cols)
+	}
+}
+
+func BenchmarkGEMVQ4_K_Q8_K_Cols2048(b *testing.B) {
+	const cols = 2048
+	const rows = 128
+	w := make([]byte, rows*(cols/tensor.QK4_K)*tensor.BlockSizeQ4_K)
+	x := make([]float32, cols)
+	q8k := make([]byte, (cols/256)*tensor.BlockSizeQ8_K)
+	y := make([]float32, rows)
+	tensor.QuantizeRowQ8_K(x, q8k, cols)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tensor.GEMVQ4_K_Q8_K(y, w, q8k, rows, cols)
+	}
 }
