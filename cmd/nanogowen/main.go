@@ -14,18 +14,7 @@ import (
 )
 
 const defaultModelPath = "/data/models/qwen2.5-0.5b-gguf/qwen2.5-0.5b-instruct-q4_k_m.gguf"
-const defaultSystemPrompt = "Tu es nanoGOqwen, un assistant autonome propulsé par un inféreur 100% pur Go.\n" +
-	"RÈGLES D'EXÉCUTION OBLIGATOIRES :\n" +
-	"1. Tu as accès direct aux outils déclarés ci-dessous (web_search, read_file, write_file, patch_file, run_command, fetch_url).\n" +
-	"2. Dès que l'utilisateur demande une recherche, de voir en ligne, de trouver des infos, de lire/écrire un fichier ou d'exécuter bash, tu DOIS IMMÉDIATEMENT émettre un appel <tool_call>.\n" +
-	"3. Ne pose JAMAIS de questions d'intention (\"où cherchez-vous\", \"quel est votre but\"), ne fais aucun bavardage : appelle directement l'outil avec les mots-clés de la requête.\n" +
-	"4. Ne dis JAMAIS que tu n'as pas accès à internet ou aux fichiers : utilise l'outil adéquat.\n\n" +
-	"EXEMPLE :\n" +
-	"User: va voir en ligne go 1.27\n" +
-	"Assistant:\n" +
-	"<tool_call>\n" +
-	"{\"name\": \"web_search\", \"arguments\": {\"query\": \"go 1.27\"}}\n" +
-	"</tool_call>"
+const defaultSystemPrompt = "Tu es nanoGOqwen, un modèle de langage compact propulsé par un inféreur 100% pur Go sans runtime CGo ni Wasm. Réponds en français de manière claire, concise et directe."
 
 func main() {
 	modelPath := flag.String("model", defaultModelPath, "Chemin vers le fichier de poids GGUF")
@@ -134,13 +123,6 @@ func runSinglePrompt(engine *c2slm.Engine, system, user string, maxTokens int, s
 }
 
 func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stopStrings []string) {
-	// Initialisation des outils de codage, de fichiers et de recherche web
-	toolReg := c2slm.NewToolRegistry()
-	_, err := c2slm.RegisterCodingTools(toolReg, ".")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Avertissement outils: %v\n", err)
-	}
-
 	// Lancement IMMÉDIAT de l'interface TUI plein écran (démarrage instantané 0s)
 	chatBox := NewChatBox()
 	chatBox.InitScreen(engine.Model.NumLayers, engine.KVCache.MaxTokens)
@@ -149,7 +131,7 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 	systemPrefilled := false
 	ensureSystemPrefilled := func() {
 		if !systemPrefilled {
-			prefillSystem(engine, system, toolReg)
+			prefillSystem(engine, system, nil)
 			systemPrefilled = true
 		}
 	}
@@ -182,11 +164,7 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 			fmt.Printf("%s[KV Cache réinitialisé : contexte remis à zéro]%s\n", ansiGreen, ansiReset)
 			continue
 		case "/tools":
-			fmt.Printf("\n%sOutils enregistrés (%d) :%s\n", ansiBold, toolReg.Len(), ansiReset)
-			for _, def := range toolReg.Definitions() {
-				fmt.Printf("  %s• %-14s%s : %s\n", ansiYellow, def.Name, ansiReset, def.Description)
-			}
-			fmt.Println()
+			fmt.Printf("\n%sOutils désactivés%s : le modèle fonctionne en mode conversation direct sans outillage.\n\n", ansiBold, ansiReset)
 			continue
 		case "/stats", "/context":
 			used := engine.KVCache.SeqLen
@@ -203,7 +181,7 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 		if engine.KVCache.SeqLen+len(deltaTokens) >= engine.KVCache.MaxTokens {
 			fmt.Printf("\n%s[contexte saturé: réancrage du préfixe système]%s\n", ansiYellow, ansiReset)
 			engine.KVCache.Reset()
-			prefillSystem(engine, system, toolReg)
+			prefillSystem(engine, system, nil)
 			systemPrefilled = true
 		}
 
@@ -213,70 +191,28 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 		turnStart := time.Now()
 		wasInterrupted := false
 
-		// Boucle multi-tours pour supporter les appels d'outils successifs
-		currentDelta := deltaTokens
-		for round := 0; round < 6; round++ {
-			toolScan := c2slm.NewToolScanner()
-			var rawToolCall string
-			hasToolCall := false
+		interrupted, cancelInference := chatBox.BeginInference()
 
-			interrupted, cancelInference := chatBox.BeginInference()
-
-			_, err := engine.GenerateStreamSession(currentDelta, maxTokens, stopStrings, func(piece string) bool {
-				if interrupted.Load() {
-					return false
-				}
-				done, _, clean := toolScan.Push(piece)
-				if clean != "" {
-					fmt.Print(clean)
-				}
-				totalTokens++
-				if done {
-					rawToolCall = toolScan.ToolJSON()
-					hasToolCall = true
-					return false
-				}
-				return true
-			})
-
-			cancelInference()
-
+		_, err := engine.GenerateStreamSession(deltaTokens, maxTokens, stopStrings, func(piece string) bool {
 			if interrupted.Load() {
-				wasInterrupted = true
-				// Scellement défensif d'imEnd dans le KV cache pour fermer proprement le tour assistant
-				_, imEnd, _ := engine.Tokenizer.SpecialTokenIDs()
-				engine.IngestFrom(engine.KVCache.SeqLen, []int32{imEnd})
-				break
+				return false
 			}
+			fmt.Print(piece)
+			totalTokens++
+			return true
+		})
 
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "\nErreur d'inférence: %v\n", err)
-				break
-			}
+		cancelInference()
 
-			if !hasToolCall {
-				break
-			}
+		if interrupted.Load() {
+			wasInterrupted = true
+			// Scellement défensif d'imEnd dans le KV cache pour fermer proprement le tour assistant
+			_, imEnd, _ := engine.Tokenizer.SpecialTokenIDs()
+			engine.IngestFrom(engine.KVCache.SeqLen, []int32{imEnd})
+		}
 
-			// Exécution de l'outil appelé par le modèle
-			call, parseErr := c2slm.ParseToolCall([]byte(rawToolCall))
-			if parseErr != nil {
-				fmt.Printf("\n[Erreur syntaxe tool_call: %v]\n", parseErr)
-				break
-			}
-
-			chatBox.PrintToolCall(call.Name, string(call.Arguments))
-			toolOutput, dispatchErr := toolReg.Dispatch(call.Name, call.Arguments)
-			if dispatchErr != nil {
-				toolOutput = fmt.Sprintf(`{"error": %q}`, dispatchErr.Error())
-				fmt.Printf("%s⚠️  [Erreur outil: %v]%s\n", ansiRed, dispatchErr, ansiReset)
-			} else {
-				chatBox.PrintToolResult(toolOutput)
-			}
-
-			// Réinjection du résultat sous <tool_response> dans le KV Cache sans dupliquer <tool_call>
-			respChunk := fmt.Sprintf("<|im_end|>\n<|im_start|>user\n<tool_response>\n%s\n</tool_response><|im_end|>\n<|im_start|>assistant\n", toolOutput)
-			currentDelta = engine.Tokenizer.Encode(respChunk)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nErreur d'inférence: %v\n", err)
 		}
 
 		elapsed := time.Since(turnStart)
