@@ -43,6 +43,7 @@ type Model struct {
 	TokenEmbd    *gguf.TensorInfo
 	OutputNorm   []float32
 	OutputWeight *gguf.TensorInfo
+	RoPETable    *tensor.RoPETable
 
 	Layers   []Layer
 	GGUFFile *gguf.File
@@ -136,6 +137,7 @@ func LoadModel(path string) (*Model, error) {
 		TokenEmbd:    tokEmbd,
 		OutputNorm:   outNorm,
 		OutputWeight: outWeight,
+		RoPETable:    tensor.NewRoPETable(MaxContextLen, int(embdLen)/int(numHeads), ropeTheta),
 		Layers:       make([]Layer, numLayers),
 		GGUFFile:     gf,
 	}

@@ -84,7 +84,7 @@ func (p *WorkerPool) workerLoop(workerID int) {
 				case gguf.GGMLTypeQ5_0:
 					tensor.GEMVQ5_0Range(p.y, p.weight, p.x, startRow, endRow, p.cols)
 				case gguf.GGMLTypeQ6_K:
-					tensor.GEMVQ6_KRange(p.y, p.weight, p.x, startRow, endRow, p.cols)
+					tensor.GEMVQ6_K_Q8_KRange(p.y, p.weight, p.q8k, startRow, endRow, p.cols)
 				case gguf.GGMLTypeQ4_K:
 					tensor.GEMVQ4_K_Q8_KRange(p.y, p.weight, p.q8k, startRow, endRow, p.cols)
 				}
@@ -96,19 +96,19 @@ func (p *WorkerPool) workerLoop(workerID int) {
 
 // ParallelGEMV executes GEMV across workers with 0 heap allocation
 func (p *WorkerPool) ParallelGEMV(y []float32, weight []byte, x []float32, rows, cols int, qtype gguf.GGMLType) {
-	if qtype == gguf.GGMLTypeQ4_K {
+	if qtype == gguf.GGMLTypeQ4_K || qtype == gguf.GGMLTypeQ6_K {
 		tensor.QuantizeRowQ8_K(x, p.q8k, cols)
 	}
 
 	if p.numWorkers <= 1 || rows < 256 {
-		// Single-threaded path for small projections
+		// Single-threaded path for small projections (ex: KV heads), avoiding goroutine wakeups
 		switch qtype {
 		case gguf.GGMLTypeQ8_0:
 			tensor.GEMVQ8_0Range(y, weight, x, 0, rows, cols)
 		case gguf.GGMLTypeQ5_0:
 			tensor.GEMVQ5_0Range(y, weight, x, 0, rows, cols)
 		case gguf.GGMLTypeQ6_K:
-			tensor.GEMVQ6_KRange(y, weight, x, 0, rows, cols)
+			tensor.GEMVQ6_K_Q8_KRange(y, weight, p.q8k, 0, rows, cols)
 		case gguf.GGMLTypeQ4_K:
 			tensor.GEMVQ4_K_Q8_KRange(y, weight, p.q8k, 0, rows, cols)
 		}

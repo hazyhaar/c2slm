@@ -125,6 +125,13 @@ type Header struct {
 	MetadataKVCount uint64
 }
 
+const (
+	mapPopulate      = 0x8000
+	madvWillneed     = 3
+	madvHugepage     = 14
+	madvPopulateRead = 22
+)
+
 // Open reads and memory-maps a GGUF file
 func Open(path string) (*File, error) {
 	f, err := os.Open(path)
@@ -143,10 +150,41 @@ func Open(path string) (*File, error) {
 		return nil, fmt.Errorf("gguf: file too small (%d bytes)", fileSize)
 	}
 
-	data, err := syscall.Mmap(int(f.Fd()), 0, int(fileSize), syscall.PROT_READ, syscall.MAP_SHARED)
+	// Palier 3: mmap avec MAP_POPULATE si possible pour précharger les pages en RAM
+	flags := syscall.MAP_SHARED | mapPopulate
+	data, err := syscall.Mmap(int(f.Fd()), 0, int(fileSize), syscall.PROT_READ, flags)
 	if err != nil {
-		return nil, fmt.Errorf("gguf mmap: %w", err)
+		// Repli sur MAP_SHARED standard si MAP_POPULATE est rejeté
+		data, err = syscall.Mmap(int(f.Fd()), 0, int(fileSize), syscall.PROT_READ, syscall.MAP_SHARED)
+		if err != nil {
+			return nil, fmt.Errorf("gguf mmap: %w", err)
+		}
 	}
+
+	// Palier 3: Conseils mémoire kernel (HugePages 2 Mo + prefetching)
+	// Activer Transparent HugePages pour diviser par 512 la pression sur le TLB L1/L2
+	_ = syscall.Madvise(data, madvHugepage)
+	// Notification au sous-système de mémoire virtuelle de précharger l'ensemble
+	_ = syscall.Madvise(data, madvWillneed)
+	_ = syscall.Madvise(data, madvPopulateRead)
+
+	// Verrouillage en RAM si les quotas RLIMIT_MEMLOCK le permettent
+	_ = syscall.Mlock(data)
+
+	// Prefault déterministe synchrone : touch d'une adresse par page
+	// Garantit zéro soft page fault pendant les passes d'inférence
+	pageSize := os.Getpagesize()
+	if pageSize <= 0 {
+		pageSize = 4096
+	}
+	var sink byte
+	for i := 0; i < len(data); i += pageSize {
+		sink ^= data[i]
+	}
+	if len(data) > 0 {
+		sink ^= data[len(data)-1]
+	}
+	_ = sink
 
 	gf := &File{
 		mmapData:  data,

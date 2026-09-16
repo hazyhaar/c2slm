@@ -90,9 +90,14 @@ func Forward(m *Model, cache *KVCache, a *Arena, tokenID int32, pos int) []float
 			}
 		}
 
-		// RoPE NeoX (rotate_half)
-		tensor.RoPENeoX(a.Q, m.NumHeads, headDim, pos, m.RoPEBase)
-		tensor.RoPENeoX(a.K, kvHeads, headDim, pos, m.RoPEBase)
+		// RoPE NeoX with precomputed ARCHTIME cache (zero transcendental calls)
+		if m.RoPETable != nil {
+			m.RoPETable.Apply(a.Q, m.NumHeads, pos)
+			m.RoPETable.Apply(a.K, kvHeads, pos)
+		} else {
+			tensor.RoPENeoX(a.Q, m.NumHeads, headDim, pos, m.RoPEBase)
+			tensor.RoPENeoX(a.K, kvHeads, headDim, pos, m.RoPEBase)
+		}
 
 		// Store K, V in KV-Cache
 		cache.StoreKV(lIdx, pos, a.K, a.V)

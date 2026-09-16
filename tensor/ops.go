@@ -115,6 +115,36 @@ func DotQ6_K(weight []byte, x []float32, cols int) float32 {
 	return simd.C2_tensor_dot_q6_k(weight, x, cols)
 }
 
+// GEMVQ6_K_Q8_KRange performs y = W * x for rows in [startRow, endRow) where W is in Q6_K and x is in Q8_K.
+// Processes rows pairwise using fused GEMV2 kernel (reusing activation registers in L1D/AVX2).
+func GEMVQ6_K_Q8_KRange(y []float32, weight []byte, q8k []byte, startRow, endRow, cols int) {
+	rowBytes := (cols / QK6_K) * BlockSizeQ6_K
+	r := startRow
+	for ; r+1 < endRow; r += 2 {
+		rowOffset0 := r * rowBytes
+		rowOffset1 := (r + 1) * rowBytes
+		simd.C2_tensor_gemv2_q6_k_q8_k(
+			weight[rowOffset0:rowOffset0+rowBytes],
+			weight[rowOffset1:rowOffset1+rowBytes],
+			q8k, cols, &y[r], &y[r+1],
+		)
+	}
+	if r < endRow {
+		rowOffset0 := r * rowBytes
+		var unused float32
+		simd.C2_tensor_gemv2_q6_k_q8_k(
+			weight[rowOffset0:rowOffset0+rowBytes],
+			weight[rowOffset0:rowOffset0+rowBytes],
+			q8k, cols, &y[r], &unused,
+		)
+	}
+}
+
+// GEMVQ6_K_Q8_K performs y = W * x where W is in Q6_K and x is pre-quantized in Q8_K.
+func GEMVQ6_K_Q8_K(y []float32, weight []byte, q8k []byte, rows, cols int) {
+	GEMVQ6_K_Q8_KRange(y, weight, q8k, 0, rows, cols)
+}
+
 // GEMVQ4_KRange performs y = W * x for rows in [startRow, endRow) where W is in Q4_K.
 func GEMVQ4_KRange(y []float32, weight []byte, x []float32, startRow, endRow, cols int) {
 	rowBytes := (cols / QK4_K) * BlockSizeQ4_K
@@ -194,6 +224,59 @@ func AddBias(x, bias []float32) {
 	}
 }
 
+// RoPETable precomputes cosine and sine rotary embeddings at ARCHTIME/init to avoid runtime transcendental calls.
+type RoPETable struct {
+	Cos     []float32 // [maxLen * halfDim]
+	Sin     []float32 // [maxLen * halfDim]
+	HeadDim int
+	HalfDim int
+	MaxLen  int
+}
+
+// NewRoPETable precomputes rotary angles for all positions in [0, maxLen).
+func NewRoPETable(maxLen, headDim int, theta float32) *RoPETable {
+	halfDim := headDim / 2
+	cos := make([]float32, maxLen*halfDim)
+	sin := make([]float32, maxLen*halfDim)
+	for p := 0; p < maxLen; p++ {
+		pOffset := p * halfDim
+		for i := 0; i < halfDim; i++ {
+			freq := 1.0 / math.Pow(float64(theta), float64(2*i)/float64(headDim))
+			val := float64(p) * freq
+			cos[pOffset+i] = float32(math.Cos(val))
+			sin[pOffset+i] = float32(math.Sin(val))
+		}
+	}
+	return &RoPETable{
+		Cos:     cos,
+		Sin:     sin,
+		HeadDim: headDim,
+		HalfDim: halfDim,
+		MaxLen:  maxLen,
+	}
+}
+
+// Apply applies precomputed RoPE to vec for pos.
+func (t *RoPETable) Apply(vec []float32, numHeads, pos int) {
+	pOffset := pos * t.HalfDim
+	cosSlice := t.Cos[pOffset : pOffset+t.HalfDim]
+	sinSlice := t.Sin[pOffset : pOffset+t.HalfDim]
+	halfDim := t.HalfDim
+	headDim := t.HeadDim
+
+	for h := 0; h < numHeads; h++ {
+		headOffset := h * headDim
+		for i := 0; i < halfDim; i++ {
+			c := cosSlice[i]
+			s := sinSlice[i]
+			x0 := vec[headOffset+i]
+			x1 := vec[headOffset+i+halfDim]
+			vec[headOffset+i] = x0*c - x1*s
+			vec[headOffset+i+halfDim] = x0*s + x1*c
+		}
+	}
+}
+
 // RoPENeoX applies rotary position embedding (NeoX / Qwen2 rotate_half convention):
 // For headDim (e.g. 64), split into two halves: [0..31] and [32..63]
 // x'[i]    = x[i] * cos(theta_i) - x[i+32] * sin(theta_i)
@@ -217,14 +300,9 @@ func RoPENeoX(vec []float32, numHeads, headDim, pos int, theta float32) {
 	}
 }
 
-// SwiGLU computes out[i] = SiLU(gate[i]) * up[i]
-// SiLU(x) = x / (1 + exp(-x))
+// SwiGLU computes out[i] = SiLU(gate[i]) * up[i] using AVX2 vectorization when available.
 func SwiGLU(out, gate, up []float32) {
-	for i := range out {
-		g := float64(gate[i])
-		silu := float32(g / (1.0 + math.Exp(-g)))
-		out[i] = silu * up[i]
-	}
+	simd.C2_tensor_swiglu(out, gate, up, len(out))
 }
 
 // Softmax computes in-place softmax over slice
