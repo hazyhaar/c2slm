@@ -124,7 +124,8 @@ func runSinglePrompt(engine *c2slm.Engine, system, user string, maxTokens int, s
 
 func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stopStrings []string) {
 	chatBox := NewChatBox()
-	chatBox.PrintBanner(engine.Model.NumLayers, engine.KVCache.MaxTokens)
+	chatBox.InitScreen(engine.Model.NumLayers, engine.KVCache.MaxTokens)
+	defer chatBox.ResetScreen()
 
 	// Initialisation des outils de codage, de fichiers et de recherche web
 	toolReg := c2slm.NewToolRegistry()
