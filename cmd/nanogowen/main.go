@@ -130,16 +130,18 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 		fmt.Fprintf(os.Stderr, "Avertissement outils: %v\n", err)
 	}
 
-	// Pré-remplissage du préfixe système pendant la phase de démarrage
-	fmt.Printf("Initialisation du préfixe système (%d outils actifs)... ", toolReg.Len())
-	t0 := time.Now()
-	prefillSystem(engine, system, toolReg)
-	fmt.Printf("prêt en %v (%d jetons en cache).\n", time.Since(t0).Round(time.Millisecond), engine.KVCache.SeqLen)
-
-	// Lancement de l'interface TUI plein écran : modèle 100% chaud et prêt
+	// Lancement IMMÉDIAT de l'interface TUI plein écran (démarrage instantané 0s)
 	chatBox := NewChatBox()
 	chatBox.InitScreen(engine.Model.NumLayers, engine.KVCache.MaxTokens)
 	defer chatBox.ResetScreen()
+
+	systemPrefilled := false
+	ensureSystemPrefilled := func() {
+		if !systemPrefilled {
+			prefillSystem(engine, system, toolReg)
+			systemPrefilled = true
+		}
+	}
 
 	for {
 		line, readErr := chatBox.ReadPrompt()
@@ -165,7 +167,7 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 			continue
 		case "/clear", "/reset":
 			engine.KVCache.Reset()
-			prefillSystem(engine, system, toolReg)
+			systemPrefilled = false
 			fmt.Printf("%s[KV Cache réinitialisé : contexte remis à zéro]%s\n", ansiGreen, ansiReset)
 			continue
 		case "/tools":
@@ -183,6 +185,7 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 			continue
 		}
 
+		ensureSystemPrefilled()
 		deltaTokens := engine.Tokenizer.Encode(formatUserTurn(line))
 
 		// Context saturation check
@@ -190,6 +193,7 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 			fmt.Printf("\n%s[contexte saturé: réancrage du préfixe système]%s\n", ansiYellow, ansiReset)
 			engine.KVCache.Reset()
 			prefillSystem(engine, system, toolReg)
+			systemPrefilled = true
 		}
 
 		chatBox.PrintAssistantHeader()

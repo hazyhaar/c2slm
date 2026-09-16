@@ -53,48 +53,48 @@ func RegisterCodingTools(reg *ToolRegistry, workspaceRoot string) (*CodingTools,
 		{
 			def: ToolDefinition{
 				Name:        "read_file",
-				Description: "Lit le contenu d'un fichier texte (avec numéros de ligne optionnels). Borné à 32 Ko.",
-				Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Chemin absolu ou relatif vers le fichier"},"start_line":{"type":"integer","minimum":1,"description":"Première ligne à lire (1-indexé, optionnel)"},"end_line":{"type":"integer","minimum":1,"description":"Dernière ligne à lire (optionnel)"}},"required":["path"]}`),
+				Description: "Lit un fichier texte (lignes optionnelles).",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer"},"end_line":{"type":"integer"}},"required":["path"]}`),
 			},
 			handler: ct.ReadFile,
 		},
 		{
 			def: ToolDefinition{
 				Name:        "write_file",
-				Description: "Crée ou écrase un fichier avec le contenu fourni. Crée les dossiers parents si nécessaire.",
-				Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Chemin du fichier à écrire"},"content":{"type":"string","description":"Contenu textuel à écrire dans le fichier"}},"required":["path","content"]}`),
+				Description: "Crée ou écrase un fichier texte.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`),
 			},
 			handler: ct.WriteFile,
 		},
 		{
 			def: ToolDefinition{
 				Name:        "patch_file",
-				Description: "Remplace exactement un bloc de texte cible par un nouveau bloc dans un fichier existant.",
-				Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Chemin du fichier à modifier"},"target_content":{"type":"string","description":"Texte exact à remplacer"},"replacement_content":{"type":"string","description":"Texte de remplacement"}},"required":["path","target_content","replacement_content"]}`),
+				Description: "Remplace un bloc de texte cible dans un fichier.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"target_content":{"type":"string"},"replacement_content":{"type":"string"}},"required":["path","target_content","replacement_content"]}`),
 			},
 			handler: ct.PatchFile,
 		},
 		{
 			def: ToolDefinition{
 				Name:        "run_command",
-				Description: "Exécute une commande système (compilation, tests, git, etc.) et capture sa sortie stdout/stderr (max 16 Ko).",
-				Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"Ligne de commande à exécuter (ex: go test -race -count=1 ./...)","timeout_seconds":{"type":"integer","minimum":1,"maximum":120,"description":"Délai maximal d'exécution en secondes (défaut 30)"}}},"required":["command"]}`),
+				Description: "Exécute une commande bash et capture stdout/stderr.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
 			},
 			handler: ct.RunCommand,
 		},
 		{
 			def: ToolDefinition{
 				Name:        "web_search",
-				Description: "Recherche sur le web via DuckDuckGo et renvoie les résumés factuels et liens associés.",
-				Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Mots-clés ou question de recherche"}},"required":["query"]}`),
+				Description: "Recherche sur le web (DuckDuckGo).",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
 			},
 			handler: ct.WebSearch,
 		},
 		{
 			def: ToolDefinition{
 				Name:        "fetch_url",
-				Description: "Télécharge une page web ou une documentation via HTTP(S) GET et extrait le contenu textuel.",
-				Parameters:  json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"URL complète à récupérer (ex: https://go.dev/...)"}},"required":["url"]}`),
+				Description: "Télécharge une page web (HTTP GET) et extrait son texte.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}`),
 			},
 			handler: ct.FetchURL,
 		},
