@@ -323,7 +323,7 @@ func (e *Engine) GenerateWithToolsStream(systemPrompt, userPrompt string, maxNew
 func buildToolsPrompt(systemPrompt string, reg *ToolRegistry, userPrompt string) string {
 	var b strings.Builder
 	b.Grow(len(systemPrompt) + len(userPrompt) + 640)
-	b.WriteString("system\n")
+	b.WriteString("<|im_start|>system\n")
 	if systemPrompt != "" {
 		b.WriteString(systemPrompt)
 	}
@@ -335,9 +335,9 @@ func buildToolsPrompt(systemPrompt string, reg *ToolRegistry, userPrompt string)
 			b.WriteString(block)
 		}
 	}
-	b.WriteString("\nuser\n")
+	b.WriteString("<|im_end|>\n<|im_start|>user\n")
 	b.WriteString(userPrompt)
-	b.WriteString("\nassistant\n")
+	b.WriteString("<|im_end|>\n<|im_start|>assistant\n")
 	return b.String()
 }
 
@@ -352,9 +352,9 @@ func toolCallTurn(rawCall, result string) string {
 	b.WriteString(strings.TrimSpace(rawCall))
 	b.WriteByte('\n')
 	b.WriteString(toolCallCloseTag)
-	b.WriteString("\nuser\n<tool_response>\n")
+	b.WriteString("<|im_end|>\n<|im_start|>user\n<tool_response>\n")
 	b.WriteString(result)
-	b.WriteString("\n</tool_response>\nassistant\n")
+	b.WriteString("\n</tool_response><|im_end|>\n<|im_start|>assistant\n")
 	return b.String()
 }
 

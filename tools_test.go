@@ -139,7 +139,7 @@ func TestBuildToolsPrompt(t *testing.T) {
 	reg.Register(ToolDefinition{Name: "inspect_proc"}, func(json.RawMessage) (string, error) { return "", nil })
 
 	prompt := buildToolsPrompt("Tu es un arbitre DNS.", reg, "Analyse ce tunnel.")
-	if !strings.HasPrefix(prompt, "system\n") {
+	if !strings.HasPrefix(prompt, "<|im_start|>system\n") {
 		t.Fatalf("préfixe système manquant: %q", prompt)
 	}
 	if !strings.Contains(prompt, "Tu es un arbitre DNS.") {
@@ -148,7 +148,7 @@ func TestBuildToolsPrompt(t *testing.T) {
 	if !strings.Contains(prompt, "# Tools") || !strings.Contains(prompt, "inspect_proc") {
 		t.Error("bloc outils absent")
 	}
-	if !strings.Contains(prompt, "\nuser\nAnalyse ce tunnel.\nassistant\n") {
+	if !strings.Contains(prompt, "<|im_start|>user\nAnalyse ce tunnel.<|im_end|>\n<|im_start|>assistant\n") {
 		t.Errorf("tour utilisateur mal formé: %q", prompt)
 	}
 
@@ -160,7 +160,7 @@ func TestBuildToolsPrompt(t *testing.T) {
 
 func TestToolCallTurn(t *testing.T) {
 	turn := toolCallTurn(`{"name":"ban_ip"}`, `{"banned":true}`)
-	want := "<tool_call>\n{\"name\":\"ban_ip\"}\n</tool_call>\nuser\n<tool_response>\n{\"banned\":true}\n</tool_response>\nassistant\n"
+	want := "<tool_call>\n{\"name\":\"ban_ip\"}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n{\"banned\":true}\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
 	if turn != want {
 		t.Fatalf("tour outil = %q, attendu %q", turn, want)
 	}

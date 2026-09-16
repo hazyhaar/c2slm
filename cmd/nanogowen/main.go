@@ -62,8 +62,16 @@ func formatChatML(system, user string) string {
 
 // formatSystemPrefix is the unique, immutable ChatML prefix materialized once
 // at session start and never recomputed afterwards.
-func formatSystemPrefix(system string) string {
-	return "<|im_start|>system\n" + system + "<|im_end|>\n"
+func formatSystemPrefix(system string, reg *c2slm.ToolRegistry) string {
+	var b strings.Builder
+	b.WriteString("<|im_start|>system\n")
+	b.WriteString(system)
+	if reg != nil && reg.Len() > 0 {
+		b.WriteString("\n\n")
+		b.WriteString(reg.SystemToolsBlock())
+	}
+	b.WriteString("<|im_end|>\n")
+	return b.String()
 }
 
 // formatUserTurn is the per-turn delta: only the new user message and the
@@ -73,8 +81,8 @@ func formatUserTurn(user string) string {
 }
 
 // prefillSystem materializes the system prompt in the KV cache from position 0.
-func prefillSystem(engine *c2slm.Engine, system string) {
-	tokens := engine.Tokenizer.Encode(formatSystemPrefix(system))
+func prefillSystem(engine *c2slm.Engine, system string, reg *c2slm.ToolRegistry) {
+	tokens := engine.Tokenizer.Encode(formatSystemPrefix(system, reg))
 	engine.IngestFrom(0, tokens)
 }
 
@@ -118,10 +126,18 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 	fmt.Println("Tapez votre message et appuyez sur [Entrée]. Entrez 'exit' ou 'quit' pour fermer.")
 	fmt.Println("--------------------------------------------------------------------------------")
 
+	// Initialisation des outils de codage, de fichiers et de recherche web
+	toolReg := c2slm.NewToolRegistry()
+	_, err := c2slm.RegisterCodingTools(toolReg, ".")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Avertissement outils: %v\n", err)
+	}
+
 	// The system prompt is materialized exactly once; every later turn appends
 	// only its delta, so the cached prefix is never recomputed.
-	prefillSystem(engine, system)
-	fmt.Printf("[préfixe système matérialisé: %d jetons en cache]\n", engine.KVCache.SeqLen)
+	prefillSystem(engine, system, toolReg)
+	fmt.Printf("[préfixe système matérialisé: %d jetons en cache | %d outils actifs]\n",
+		engine.KVCache.SeqLen, toolReg.Len())
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
@@ -140,44 +156,83 @@ func runInteractiveREPL(engine *c2slm.Engine, system string, maxTokens int, stop
 
 		deltaTokens := engine.Tokenizer.Encode(formatUserTurn(line))
 
-		// Context saturation is the only case that legitimately discards the
-		// cache: re-anchor on the system prefix and replay the current turn.
+		// Context saturation check
 		if engine.KVCache.SeqLen+len(deltaTokens) >= engine.KVCache.MaxTokens {
 			fmt.Println("\n[contexte saturé: réancrage du préfixe système]")
 			engine.KVCache.Reset()
-			prefillSystem(engine, system)
+			prefillSystem(engine, system, toolReg)
 		}
 
 		fmt.Print("\n[nanoGOqwen]: ")
 
-		tokenCount := 0
-		genStart := time.Now()
+		totalTokens := 0
+		turnStart := time.Now()
 
-		var m1, m2 runtime.MemStats
-		runtime.ReadMemStats(&m1)
+		// Boucle multi-tours pour supporter les appels d'outils successifs
+		currentDelta := deltaTokens
+		for round := 0; round < 6; round++ {
+			toolScan := c2slm.NewToolScanner()
+			var rawToolCall string
+			hasToolCall := false
 
-		_, err := engine.GenerateStreamSession(deltaTokens, maxTokens, stopStrings, func(piece string) bool {
-			fmt.Print(piece)
-			tokenCount++
-			return true
-		})
-		elapsed := time.Since(genStart)
-		runtime.ReadMemStats(&m2)
+			_, err := engine.GenerateStreamSession(currentDelta, maxTokens, stopStrings, func(piece string) bool {
+				done, _, clean := toolScan.Push(piece)
+				if clean != "" {
+					fmt.Print(clean)
+				}
+				totalTokens++
+				if done {
+					rawToolCall = toolScan.ToolJSON()
+					hasToolCall = true
+					return false
+				}
+				return true
+			})
+
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "\nErreur d'inférence: %v\n", err)
+				break
+			}
+
+			if !hasToolCall {
+				break
+			}
+
+			// Exécution de l'outil appelé par le modèle
+			call, parseErr := c2slm.ParseToolCall([]byte(rawToolCall))
+			if parseErr != nil {
+				fmt.Printf("\n[Erreur syntaxe tool_call: %v]\n", parseErr)
+				break
+			}
+
+			fmt.Printf("\n⚙️ [Appel d'outil: %s(%s)]\n", call.Name, string(call.Arguments))
+			toolOutput, dispatchErr := toolReg.Dispatch(call.Name, call.Arguments)
+			if dispatchErr != nil {
+				toolOutput = fmt.Sprintf(`{"error": %q}`, dispatchErr.Error())
+				fmt.Printf("⚠️ [Erreur exécution outil: %v]\n", dispatchErr)
+			} else {
+				preview := toolOutput
+				if len(preview) > 120 {
+					preview = preview[:120] + "..."
+				}
+				fmt.Printf("📥 [Résultat reçu (%d octets): %s]\n", len(toolOutput), preview)
+			}
+
+			// Réinjection du résultat sous <tool_response> dans le KV Cache
+			respChunk := fmt.Sprintf("<tool_call>\n%s\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n%s\n</tool_response><|im_end|>\n<|im_start|>assistant\n",
+				strings.TrimSpace(rawToolCall), toolOutput)
+			currentDelta = engine.Tokenizer.Encode(respChunk)
+		}
+
+		elapsed := time.Since(turnStart)
 		fmt.Println()
 
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Erreur d'inférence: %v\n", err)
-			continue
-		}
-
 		tps := 0.0
-		if elapsed.Seconds() > 0 && tokenCount > 0 {
-			tps = float64(tokenCount) / elapsed.Seconds()
+		if elapsed.Seconds() > 0 && totalTokens > 0 {
+			tps = float64(totalTokens) / elapsed.Seconds()
 		}
-		mallocs := m2.Mallocs - m1.Mallocs
-		bytesAlloc := m2.TotalAlloc - m1.TotalAlloc
-		fmt.Printf("[%d jetons en %v (%.2f tok/s) | %d allocs (%d octets) | cache=%d/%d]\n",
-			tokenCount, elapsed.Round(time.Millisecond), tps, mallocs, bytesAlloc,
+		fmt.Printf("[%d jetons en %v (%.2f tok/s) | cache=%d/%d]\n",
+			totalTokens, elapsed.Round(time.Millisecond), tps,
 			engine.KVCache.SeqLen, engine.KVCache.MaxTokens)
 	}
 }
