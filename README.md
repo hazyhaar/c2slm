@@ -26,8 +26,10 @@
 - **Native GGUF v2 / v3 Loader:**
   - Zero-copy direct memory-mapping (`mmap`) of weight files.
   - Supported quantizations: `Q4_K` (accelerated integer path), `Q8_0`, `Q5_0`, `Q6_K`, and `F32`.
-- **Integrated Pure-Go ChatML Tokenizer:**
+- **Integrated Pure-Go ChatML Tokenizer & Interactive TUI:**
   - Fast regex-based token splitting with full 151,936-token BPE vocabulary support and special token handling.
+  - Dedicated zero-dependency VT100/ANSI terminal user interface (`DECSTBM` scrolling region, anchored bottom input prompt, dynamic Unicode rune width rendering, instant Ctrl+C interruption preserving the KV-cache).
+  - Dynamic repetition penalty filtering on recent logits to avoid autoregressive generation loops.
 
 ---
 
@@ -52,18 +54,27 @@ Measured on physical hardware (**Intel Core i9-14900K**, 24 cores / 32 threads, 
 
 ```bash
 # Build with SIMD intrinsics enabled
-GOEXPERIMENT=simd go build -o nanogowen ./cmd/nanogowen
+GOEXPERIMENT=simd go build -o bin/nanogowen ./cmd/nanogowen
 ```
 
 ### Running Inference
 
 ```bash
-# Single prompt mode:
-./nanogowen -model /path/to/qwen2.5-0.5b-instruct-q4_k_m.gguf -m "Explain Claude Shannon's information entropy."
+# Single prompt mode (one-shot batch execution):
+./bin/nanogowen -model /path/to/qwen2.5-0.5b-instruct-q4_k_m.gguf -m "Explain Claude Shannon's information entropy."
 
-# Interactive REPL mode:
-./nanogowen -model /path/to/qwen2.5-0.5b-instruct-q4_k_m.gguf
+# Interactive Full-Screen TUI Mode (anchored prompt, ANSI scrolling region):
+./bin/nanogowen -model /path/to/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
+
+### Interactive TUI Commands
+
+While running in interactive mode, the following commands are available:
+- `/stats` or `/context`: Inspect live KV-cache capacity and sequence length occupancy.
+- `/clear` or `/reset`: Reset the KV cache and re-anchor the system prompt.
+- `/help`: Display keyboard shortcuts and built-in commands.
+- `Ctrl+C`: Abort ongoing assistant generation immediately without losing conversation history.
+- `/exit` or `/quit`: Gracefully exit the session.
 
 ---
 

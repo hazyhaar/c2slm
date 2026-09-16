@@ -19,8 +19,10 @@ Spécialisé pour l'architecture **Qwen2.5 / Qwen2** (modèle de référence phy
 - **Format GGUF Natif v2 / v3 :**
   - Mmap direct du fichier de poids sans duplication mémoire.
   - Formats de quantification supportés : `Q4_K` (avec noyau entier Q8_K), `Q8_0`, `Q5_0`, `Q6_K`, `F32`.
-- **Tokenizer BPE ChatML Intégré :**
+- **Tokenizer BPE ChatML Intégré & Interface TUI Interactive :**
   - Découpage par expressions régulières et vocabulaire BPE de 151 936 jetons.
+  - Interface plein écran VT100 / ANSI autonome (région de défilement `DECSTBM`, barre de saisie ancrée en bas, gestion des largeurs Unicode, interruption instantanée Ctrl+C sans perte de contexte).
+  - Pénalité de répétition dynamique sur les logits récents pour éliminer les boucles autoregressives.
 
 ---
 
@@ -44,18 +46,27 @@ Mesures issues de tests réels sous `testing.B` et inférence physique :
 ### Compilation du CLI `nanogowen`
 
 ```bash
-GOEXPERIMENT=simd go build -o nanogowen ./cmd/nanogowen
+GOEXPERIMENT=simd go build -o bin/nanogowen ./cmd/nanogowen
 ```
 
 ### Exécution du CLI
 
 ```bash
 # Inférence ponctuelle en ligne de commande :
-./nanogowen -model /chemin/vers/qwen2.5-0.5b-instruct-q4_k_m.gguf -m "Explique la théorie de l'information de Shannon."
+./bin/nanogowen -model /chemin/vers/qwen2.5-0.5b-instruct-q4_k_m.gguf -m "Explique la théorie de l'information de Shannon."
 
-# Mode REPL interactif :
-./nanogowen -model /chemin/vers/qwen2.5-0.5b-instruct-q4_k_m.gguf
+# Mode interactif plein écran TUI (barre ancrée, région de défilement ANSI) :
+./bin/nanogowen -model /chemin/vers/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
+
+### Commandes du Mode TUI Interactif
+
+Pendant une session interactive, les commandes suivantes sont disponibles :
+- `/stats` ou `/context` : affiche l'occupation et la capacité du KV-cache.
+- `/clear` ou `/reset` : réinitialise le KV-cache et réancre le prompt système.
+- `/help` : affiche l'aide et les raccourcis.
+- `Ctrl+C` : interrompt la réponse de l'assistant sans perdre l'historique du dialogue.
+- `/exit` ou `/quit` : quitte proprement la session.
 
 ### Utilisation comme Bibliothèque Go
 
